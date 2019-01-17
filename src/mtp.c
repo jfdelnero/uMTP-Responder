@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 Viveris Technologies
+ * Copyright (c) 2018 - 2019 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -34,6 +34,8 @@
 
 #include <sys/types.h>
 
+#include <pthread.h>
+
 #include "logs_out.h"
 
 #include "mtp_helpers.h"
@@ -50,6 +52,8 @@
 
 #include "mtp_support_def.h"
 
+#include "inotify.h"
+
 #define MAX_RX_BUFFER_SIZE (2*1024)
 #define MAX_TX_BUFFER_SIZE (2*1024)
 
@@ -57,7 +61,7 @@ mtp_ctx * mtp_init_responder()
 {
 	mtp_ctx * ctx;
 
-	PRINT_DEBUG("init_mtp_responder\n");
+	PRINT_DEBUG("init_mtp_responder");
 
 	ctx = malloc(sizeof(mtp_ctx));
 	if(ctx)
@@ -80,7 +84,11 @@ mtp_ctx * mtp_init_responder()
 		if(!ctx->temp_array)
 			goto init_error;
 
-		PRINT_DEBUG("init_mtp_responder : Ok !\n");
+		pthread_mutex_init ( &ctx->inotify_mutex, NULL);
+
+		inotify_handler_init( ctx );
+
+		PRINT_DEBUG("init_mtp_responder : Ok !");
 
 		return ctx;
 	}
@@ -103,7 +111,7 @@ init_error:
 		free(ctx);
 	}
 
-	PRINT_ERROR("init_mtp_responder : Failed !\n");
+	PRINT_ERROR("init_mtp_responder : Failed !");
 
 	return 0;
 }
@@ -112,6 +120,8 @@ void mtp_deinit_responder(mtp_ctx * ctx)
 {
 	if( ctx )
 	{
+		inotify_handler_deinit( ctx );
+
 		if(ctx->wrbuffer)
 			free(ctx->wrbuffer);
 
@@ -140,17 +150,39 @@ int delete_tree(mtp_ctx * ctx,uint32_t handle)
 	{
 		path = build_full_path(ctx->fs_db, mtp_get_storage_root(ctx, entry->storage_id), entry);
 
-		if(entry->flags & ENTRY_IS_DIR)
+		if (path)
 		{
-			ret = remove(path);
-			if(!ret)
-				entry->flags |= ENTRY_IS_DELETED;
-		}
-		else
-		{
-			ret = remove(path);
-			if(!ret)
-				entry->flags |= ENTRY_IS_DELETED;
+			if(entry->flags & ENTRY_IS_DIR)
+			{
+				ret = fs_remove_tree( path );
+
+				if(!ret)
+				{
+					entry->flags |= ENTRY_IS_DELETED;
+					if( entry->watch_descriptor != -1 )
+					{
+						inotify_handler_rmwatch( ctx, entry->watch_descriptor );
+						entry->watch_descriptor = -1;
+					}
+				}
+				else
+					scan_and_add_folder(ctx->fs_db, path, handle, entry->storage_id); // partially deleted ? update/sync the db.
+			}
+			else
+			{
+				ret = remove(path);
+				if(!ret)
+				{
+					entry->flags |= ENTRY_IS_DELETED;
+					if( entry->watch_descriptor != -1 )
+					{
+						inotify_handler_rmwatch( ctx, entry->watch_descriptor );
+						entry->watch_descriptor = -1;
+					}
+				}
+			}
+
+			free(path);
 		}
 	}
 
@@ -201,7 +233,7 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 	if(parent_handle == 0xFFFFFFFF)
 		parent_handle = 0x00000000;
 
-	PRINT_DEBUG("Incoming dataset : %d bytes (raw) %d bytes, operation 0x%x, code 0x%x, tx_id: %x\n",size,tmp_hdr->length,tmp_hdr->operation,tmp_hdr->code ,tmp_hdr->tx_id );
+	PRINT_DEBUG("Incoming dataset : %d bytes (raw) %d bytes, operation 0x%x, code 0x%x, tx_id: %x",size,tmp_hdr->length,tmp_hdr->operation,tmp_hdr->code ,tmp_hdr->tx_id );
 
 	dataset_ptr = (datain + sizeof(MTP_PACKET_HEADER));
 
@@ -231,7 +263,7 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 					tmp_str[i] = peek(dataset_ptr,0x35 + (i*2), 1);
 				}
 
-				PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : 0x%x objectformat Size %d, Parent 0x%.8x, type: %x, strlen %d str:%s\n",objectformat,objectsize,parent_handle,type,string_len,tmp_str);
+				PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : 0x%x objectformat Size %d, Parent 0x%.8x, type: %x, strlen %d str:%s",objectformat,objectsize,parent_handle,type,string_len,tmp_str);
 
 				entry = get_entry_by_handle_and_storageid(ctx->fs_db, parent_handle,storage_id);
 				if(entry)
@@ -244,7 +276,7 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 
 						if(parent_folder)
 						{
-							PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Parent folder %s\n",parent_folder);
+							PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Parent folder %s",parent_folder);
 
 							tmp_path = malloc(strlen(parent_folder) + 1 + strlen(tmp_str) + 1);
 						}
@@ -252,11 +284,11 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 						if(tmp_path)
 						{
 							sprintf(tmp_path,"%s/%s",parent_folder,tmp_str);
-							PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Creating %s ...\n",tmp_path);
+							PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Creating %s ...",tmp_path);
 
 							if( mkdir(tmp_path, 0700) )
 							{
-								PRINT_WARN("MTP_OPERATION_SEND_OBJECT_INFO : Can't create %s ...\n",tmp_path);
+								PRINT_WARN("MTP_OPERATION_SEND_OBJECT_INFO : Can't create %s ...",tmp_path);
 
 								if(parent_folder)
 									free(parent_folder);
@@ -308,7 +340,7 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 					tmp_str[i] = peek(dataset_ptr,0x35 + (i*2), 1);
 				}
 
-				PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : 0x%x objectformat Size %d, Parent 0x%.8x, type: %x, strlen %d str:%s\n",objectformat,objectsize,parent_handle,type,string_len,tmp_str);
+				PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : 0x%x objectformat Size %d, Parent 0x%.8x, type: %x, strlen %d str:%s",objectformat,objectsize,parent_handle,type,string_len,tmp_str);
 
 				entry = get_entry_by_handle_and_storageid(ctx->fs_db, parent_handle,storage_id);
 				if(entry)
@@ -322,14 +354,14 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 
 						if(parent_folder)
 						{
-							PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Parent folder %s\n",parent_folder);
+							PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Parent folder %s",parent_folder);
 							tmp_path = malloc(strlen(parent_folder) + 1 + strlen(tmp_str) + 1);
 						}
 
 						if( tmp_path )
 						{
 							sprintf(tmp_path,"%s/%s",parent_folder,tmp_str);
-							PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Creating %s ...\n",tmp_path);
+							PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Creating %s ...",tmp_path);
 
 							tmp_file_entry.isdirectory = 0;
 							strcpy(tmp_file_entry.filename,tmp_str);
@@ -338,7 +370,7 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 							f = fopen(tmp_path,"wb");
 							if(!f)
 							{
-								PRINT_WARN("MTP_OPERATION_SEND_OBJECT_INFO : Can't create %s ...\n",tmp_path);
+								PRINT_WARN("MTP_OPERATION_SEND_OBJECT_INFO : Can't create %s ...",tmp_path);
 
 								if(parent_folder)
 									free(parent_folder);
@@ -390,10 +422,10 @@ int check_and_send_USB_ZLP(mtp_ctx * ctx , int size)
 	// USB ZLP needed ?
 	if( (size >= ctx->max_packet_size) && !(size % ctx->max_packet_size) )
 	{
-		PRINT_DEBUG("%d bytes transfert ended - ZLP packet needed\n", size);
+		PRINT_DEBUG("%d bytes transfert ended - ZLP packet needed", size);
 
 		// Yes - Send zero lenght packet.
-		write_usb(ctx->usb_ctx,ctx->wrbuffer,0);
+		write_usb(ctx->usb_ctx,EP_DESCRIPTOR_IN,ctx->wrbuffer,0);
 
 		return 1;
 	}
@@ -427,7 +459,7 @@ int send_file_data( mtp_ctx * ctx, fs_entry * entry,uint32_t offset, uint32_t ma
 
 	k = ctx->max_packet_size;
 
-	PRINT_DEBUG("send_file_data : Offset 0x%.8X - Maxsize 0x%.8X - Size 0x%.8X - ActualSize 0x%.8X\n", offset,maxsize,entry->size,actualsize);
+	PRINT_DEBUG("send_file_data : Offset 0x%.8X - Maxsize 0x%.8X - Size 0x%.8X - ActualSize 0x%.8X", offset,maxsize,entry->size,actualsize);
 
 	f = entry_open(ctx->fs_db, entry);
 	if( f )
@@ -446,7 +478,7 @@ int send_file_data( mtp_ctx * ctx, fs_entry * entry,uint32_t offset, uint32_t ma
 
 			PRINT_DEBUG("---> %d (%d)",j,ofs);
 
-			write_usb(ctx->usb_ctx,ctx->wrbuffer,ofs);
+			write_usb(ctx->usb_ctx,EP_DESCRIPTOR_IN,ctx->wrbuffer,ofs);
 
 			ofs = 0;
 
@@ -462,7 +494,6 @@ int send_file_data( mtp_ctx * ctx, fs_entry * entry,uint32_t offset, uint32_t ma
 	return actualsize;
 }
 
-
 int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int rawsize)
 {
 	fs_entry * entry;
@@ -475,6 +506,7 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 	int ofs, no_response;
 	unsigned char * tmp_ptr;
 	char * full_path;
+	char * tmp_str;
 	FILE * f;
 
 	params[0] = 0x000000;
@@ -497,12 +529,14 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 			i = 0;
 			while( (i < MAX_STORAGE_NB) && ctx->storages[i].root_path)
 			{
+				pthread_mutex_lock( &ctx->inotify_mutex );
 				alloc_root_entry(ctx->fs_db, ctx->storages[i].storage_id);
+				pthread_mutex_unlock( &ctx->inotify_mutex );
 
 				i++;
 			}
 
-			PRINT_DEBUG("Open session - ID 0x%.8x\n",ctx->session_id);
+			PRINT_DEBUG("Open session - ID 0x%.8x",ctx->session_id);
 
 			response_code = MTP_RESPONSE_OK;
 
@@ -527,7 +561,10 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 			ofs = 0;
 			poke(ctx->wrbuffer, &ofs, 4, size);
 
-			write_usb(ctx->usb_ctx,ctx->wrbuffer,size);
+			PRINT_DEBUG("MTP_OPERATION_GET_DEVICE_INFO response (%d Bytes):",size);
+			PRINT_DEBUG_BUF(ctx->wrbuffer, size);
+
+			write_usb(ctx->usb_ctx,EP_DESCRIPTOR_IN,ctx->wrbuffer,size);
 
 			check_and_send_USB_ZLP(ctx , size );
 
@@ -553,7 +590,10 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 			ofs = 0;
 			poke(ctx->wrbuffer, &ofs, 4, size);
 
-			write_usb(ctx->usb_ctx,ctx->wrbuffer,size);
+			PRINT_DEBUG("MTP_OPERATION_GET_STORAGE_IDS response (%d Bytes):",size);
+			PRINT_DEBUG_BUF(ctx->wrbuffer, size);
+
+			write_usb(ctx->usb_ctx,EP_DESCRIPTOR_IN,ctx->wrbuffer,size);
 
 			check_and_send_USB_ZLP(ctx , size );
 
@@ -574,7 +614,10 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 				ofs = 0;
 				poke(ctx->wrbuffer, &ofs, 4, size);
 
-				write_usb(ctx->usb_ctx,ctx->wrbuffer,size);
+				PRINT_DEBUG("MTP_OPERATION_GET_STORAGE_INFO response (%d Bytes):",size);
+				PRINT_DEBUG_BUF(ctx->wrbuffer, size);
+
+				write_usb(ctx->usb_ctx,EP_DESCRIPTOR_IN,ctx->wrbuffer,size);
 
 				check_and_send_USB_ZLP(ctx , size );
 
@@ -588,29 +631,34 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 
 		case MTP_OPERATION_GET_OBJECT_HANDLES:
 
+			pthread_mutex_lock( &ctx->inotify_mutex );
+
 			storageid = peek(mtp_packet_hdr, sizeof(MTP_PACKET_HEADER) + 0, 4);        // Get param 1 - Storage ID
 
 			i = build_response(ctx, mtp_packet_hdr->tx_id, MTP_CONTAINER_TYPE_DATA, mtp_packet_hdr->code, ctx->wrbuffer,0,0);
 
 			parent_handle = peek(mtp_packet_hdr, sizeof(MTP_PACKET_HEADER)+ 8, 4);     // Get param 3 - parent handle
 
-			PRINT_DEBUG("MTP_OPERATION_GET_OBJECT_HANDLES - Parent Handle 0x%.8x, Storage ID 0x%.8x\n",parent_handle,storageid);
+			PRINT_DEBUG("MTP_OPERATION_GET_OBJECT_HANDLES - Parent Handle 0x%.8x, Storage ID 0x%.8x",parent_handle,storageid);
 
 			if(!mtp_get_storage_root(ctx,storageid))
 			{
-				PRINT_WARN("MTP_OPERATION_GET_OBJECT_HANDLES : INVALID STORAGE ID!\n");
+				PRINT_WARN("MTP_OPERATION_GET_OBJECT_HANDLES : INVALID STORAGE ID!");
 
 				response_code = MTP_RESPONSE_INVALID_STORAGE_ID;
 				break;
 			}
 
+			tmp_str = 0;
 			full_path = 0;
+			entry = 0;
 			if(parent_handle && parent_handle!=0xFFFFFFFF)
 			{
 				entry = get_entry_by_handle(ctx->fs_db, parent_handle);
 				if(entry)
 				{
-					full_path = build_full_path(ctx->fs_db, mtp_get_storage_root(ctx, entry->storage_id), entry);
+					tmp_str = build_full_path(ctx->fs_db, mtp_get_storage_root(ctx, entry->storage_id), entry);
+					full_path = tmp_str;
 				}
 			}
 			else
@@ -618,6 +666,7 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 				// root folder
 				parent_handle = 0x00000000;
 				full_path = mtp_get_storage_root(ctx,storageid);
+				entry = get_entry_by_handle(ctx->fs_db, parent_handle);
 			}
 
 			nb_of_handles = 0;
@@ -630,11 +679,23 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 
 				while( get_next_child_handle(ctx->fs_db) )
 				{
-				   nb_of_handles++;
+					nb_of_handles++;
 				}
 
 				// Restart
 				init_search_handle(ctx->fs_db, parent_handle, storageid);
+
+				// Register a watch point.
+				if( entry )
+				{
+					if ( entry->flags & ENTRY_IS_DIR )
+					{
+						entry->watch_descriptor = inotify_handler_addwatch( ctx, full_path );
+					}
+				}
+
+				if (tmp_str)
+					free(tmp_str);
 			}
 
 			// Update packet size
@@ -646,6 +707,8 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 
 			poke(ctx->wrbuffer, &ofs, 4, nb_of_handles);
 
+			PRINT_DEBUG("MTP_OPERATION_GET_OBJECT_HANDLES response :");
+
 			handle_index = 0;
 			do
 			{
@@ -654,15 +717,17 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 					entry = get_next_child_handle(ctx->fs_db);
 					if(entry)
 					{
-						PRINT_DEBUG("File : %s Handle:%.8x\n",entry->name,entry->handle);
+						PRINT_DEBUG("File : %s Handle:%.8x",entry->name,entry->handle);
 						poke(ctx->wrbuffer, &ofs, 4, entry->handle);
 
 						handle_index++;
 					}
 				}while( ofs < ctx->max_packet_size && handle_index < nb_of_handles);
 
+				PRINT_DEBUG_BUF(ctx->wrbuffer, ofs);
+
 				// Current usb packet full, need to send it.
-				write_usb(ctx->usb_ctx,ctx->wrbuffer,ofs);
+				write_usb(ctx->usb_ctx,EP_DESCRIPTOR_IN,ctx->wrbuffer,ofs);
 
 				ofs = 0;
 
@@ -671,11 +736,15 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 			// Total size = Header size + nb of handles field (uint32_t) + all handles
 			check_and_send_USB_ZLP(ctx , sizeof(MTP_PACKET_HEADER) + sizeof(uint32_t) + (nb_of_handles * sizeof(uint32_t)) );
 
+			pthread_mutex_unlock( &ctx->inotify_mutex );
+
 			response_code = MTP_RESPONSE_OK;
 
 		break;
 
 		case MTP_OPERATION_GET_OBJECT_INFO:
+
+			pthread_mutex_lock( &ctx->inotify_mutex );
 
 			handle = peek(mtp_packet_hdr, sizeof(MTP_PACKET_HEADER), 4); // Get param 1 - object handle
 			entry = get_entry_by_handle(ctx->fs_db, handle);
@@ -686,7 +755,11 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 
 				i = 0;
 				poke(ctx->wrbuffer, &i, 4, size);
-				write_usb(ctx->usb_ctx,ctx->wrbuffer,size);
+
+				PRINT_DEBUG("MTP_OPERATION_GET_OBJECT_INFO response (%d Bytes):",size);
+				PRINT_DEBUG_BUF(ctx->wrbuffer, size);
+
+				write_usb(ctx->usb_ctx,EP_DESCRIPTOR_IN,ctx->wrbuffer,size);
 
 				check_and_send_USB_ZLP(ctx , size );
 
@@ -694,21 +767,25 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 			}
 			else
 			{
-				PRINT_WARN("MTP_OPERATION_GET_OBJECT_INFO ! : Entry/Handle not found (0x%.8X)\n", handle);
+				PRINT_WARN("MTP_OPERATION_GET_OBJECT_INFO ! : Entry/Handle not found (0x%.8X)", handle);
 
 				response_code = MTP_RESPONSE_INVALID_OBJECT_HANDLE;
 			}
 
+			pthread_mutex_unlock( &ctx->inotify_mutex );
+
 		break;
 
 		case MTP_OPERATION_GET_PARTIAL_OBJECT:
+
+			pthread_mutex_lock( &ctx->inotify_mutex );
 
 			handle = peek(mtp_packet_hdr, sizeof(MTP_PACKET_HEADER), 4);      // Get param 1 - Object handle
 			offset = peek(mtp_packet_hdr, sizeof(MTP_PACKET_HEADER) + 4, 4);  // Get param 2 - Offset in bytes
 			maxsize = peek(mtp_packet_hdr, sizeof(MTP_PACKET_HEADER) + 8, 4); // Get param 2 - Max size in bytes
 			entry = get_entry_by_handle(ctx->fs_db, handle);
 
-			PRINT_DEBUG("MTP_OPERATION_GET_PARTIAL_OBJECT : handle 0x%.8X - Offset 0x%.8X - Maxsize 0x%.8X\n", handle,offset,maxsize);
+			PRINT_DEBUG("MTP_OPERATION_GET_PARTIAL_OBJECT : handle 0x%.8X - Offset 0x%.8X - Maxsize 0x%.8X", handle,offset,maxsize);
 
 			if(entry)
 			{
@@ -724,14 +801,18 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 			}
 			else
 			{
-				PRINT_WARN("MTP_OPERATION_GET_PARTIAL_OBJECT ! : Entry/Handle not found (0x%.8X)\n", handle);
+				PRINT_WARN("MTP_OPERATION_GET_PARTIAL_OBJECT ! : Entry/Handle not found (0x%.8X)", handle);
 
 				response_code = MTP_RESPONSE_INVALID_OBJECT_HANDLE;
 			}
 
+			pthread_mutex_unlock( &ctx->inotify_mutex );
+
 		break;
 
 		case MTP_OPERATION_GET_OBJECT:
+
+			pthread_mutex_lock( &ctx->inotify_mutex );
 
 			handle = peek(mtp_packet_hdr, sizeof(MTP_PACKET_HEADER), 4); // Get param 1 - object handle
 			entry = get_entry_by_handle(ctx->fs_db, handle);
@@ -745,19 +826,23 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 			}
 			else
 			{
-				PRINT_WARN("MTP_OPERATION_GET_OBJECT ! : Entry/Handle not found (0x%.8X)\n", handle);
+				PRINT_WARN("MTP_OPERATION_GET_OBJECT ! : Entry/Handle not found (0x%.8X)", handle);
 
 				response_code = MTP_RESPONSE_INVALID_OBJECT_HANDLE;
 			}
+
+			pthread_mutex_unlock( &ctx->inotify_mutex );
 
 		break;
 
 		case MTP_OPERATION_SEND_OBJECT_INFO:
 
+			pthread_mutex_lock( &ctx->inotify_mutex );
+
 			storageid = peek(mtp_packet_hdr, sizeof(MTP_PACKET_HEADER), 4);         // Get param 1 - storage id
 			parent_handle = peek(mtp_packet_hdr, sizeof(MTP_PACKET_HEADER) + 4, 4); // Get param 2 - parent handle
 
-			PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Rx dataset...\n");
+			PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Rx dataset...");
 
 			size = read_usb(ctx->usb_ctx, ctx->rdbuffer2, MAX_RX_BUFFER_SIZE);
 			PRINT_DEBUG_BUF(ctx->rdbuffer2, size);
@@ -765,15 +850,19 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 			response_code = parse_incomming_dataset(ctx,ctx->rdbuffer2,size,&new_handle,parent_handle,storageid);
 			if( response_code == MTP_RESPONSE_OK )
 			{
-				PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Response - storageid: 0x%.8X, parent_handle: 0x%.8X, new_handle: 0x%.8X \n",storageid,parent_handle,new_handle);
+				PRINT_DEBUG("MTP_OPERATION_SEND_OBJECT_INFO : Response - storageid: 0x%.8X, parent_handle: 0x%.8X, new_handle: 0x%.8X ",storageid,parent_handle,new_handle);
 				params[0] = storageid;
 				params[1] = parent_handle;
 				params[2] = new_handle;
 			}
 
+			pthread_mutex_unlock( &ctx->inotify_mutex );
+
 		break;
 
 		case MTP_OPERATION_SEND_OBJECT:
+
+			pthread_mutex_lock( &ctx->inotify_mutex );
 
 			response_code = MTP_RESPONSE_GENERAL_ERROR;
 
@@ -820,6 +909,8 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 
 									response_code = MTP_RESPONSE_OK;
 								}
+
+								free( full_path );
 							}
 						}
 						else
@@ -838,13 +929,18 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 			}
 			else
 			{
-				PRINT_WARN("MTP_OPERATION_SEND_OBJECT ! : Invalid Handle (0x%.8X)\n", ctx->SendObjInfoHandle);
+				PRINT_WARN("MTP_OPERATION_SEND_OBJECT ! : Invalid Handle (0x%.8X)", ctx->SendObjInfoHandle);
 
 				response_code = MTP_RESPONSE_INVALID_OBJECT_HANDLE;
 			}
+
+			pthread_mutex_unlock( &ctx->inotify_mutex );
+
 		break;
 
 		case MTP_OPERATION_DELETE_OBJECT:
+
+			pthread_mutex_lock( &ctx->inotify_mutex );
 
 			handle = peek(mtp_packet_hdr, sizeof(MTP_PACKET_HEADER), 4); // Get param 1 - object handle
 
@@ -857,11 +953,13 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 				response_code = MTP_RESPONSE_OK;
 			}
 
+			pthread_mutex_unlock( &ctx->inotify_mutex );
+
 		break;
 
 		default:
 
-			PRINT_WARN("MTP code unsupported ! : 0x%.4X (%s)\n", mtp_packet_hdr->code,mtp_get_operation_string(mtp_packet_hdr->code));
+			PRINT_WARN("MTP code unsupported ! : 0x%.4X (%s)", mtp_packet_hdr->code,mtp_get_operation_string(mtp_packet_hdr->code));
 
 			response_code = MTP_RESPONSE_OPERATION_NOT_SUPPORTED;
 
@@ -872,8 +970,13 @@ int process_in_packet(mtp_ctx * ctx,MTP_PACKET_HEADER * mtp_packet_hdr, int raws
 	if(!no_response)
 	{
 		size = build_response(ctx, mtp_packet_hdr->tx_id,MTP_CONTAINER_TYPE_RESPONSE, response_code, ctx->wrbuffer,&params,sizeof(params));
-		write_usb(ctx->usb_ctx,ctx->wrbuffer,size);
+
+		PRINT_DEBUG("Status response (%d Bytes):",size);
+		PRINT_DEBUG_BUF(ctx->wrbuffer, size);
+
+		write_usb(ctx->usb_ctx,EP_DESCRIPTOR_IN,ctx->wrbuffer,size);
 	}
+
 	return 0; // TODO Return usb error code.
 }
 
@@ -887,29 +990,30 @@ int mtp_incoming_packet(mtp_ctx * ctx)
 
 	size = read_usb(ctx->usb_ctx, ctx->rdbuffer, MAX_RX_BUFFER_SIZE);
 
-	if(size>0)
+	if(size>=0)
 	{
-		PRINT_DEBUG("incoming_packet : %p - rawsize : %d\n",ctx->rdbuffer,size);
+		PRINT_DEBUG("incoming_packet : %p - rawsize : %d",ctx->rdbuffer,size);
+
+		if(!size)
+			return 0; // ZLP
 
 		mtp_packet_hdr = (MTP_PACKET_HEADER *)ctx->rdbuffer;
 
-		PRINT_DEBUG("MTP Packet size : %d bytes\n", mtp_packet_hdr->length);
-		PRINT_DEBUG("MTP Operation   : 0x%.4X (%s)\n", mtp_packet_hdr->operation, mtp_get_type_string(mtp_packet_hdr->operation) );
-		PRINT_DEBUG("MTP code        : 0x%.4X (%s)\n", mtp_packet_hdr->code,mtp_get_operation_string(mtp_packet_hdr->code));
-		PRINT_DEBUG("MTP Tx ID       : 0x%.8X\n", mtp_packet_hdr->tx_id);
+		PRINT_DEBUG("MTP Packet size : %d bytes", mtp_packet_hdr->length);
+		PRINT_DEBUG("MTP Operation   : 0x%.4X (%s)", mtp_packet_hdr->operation, mtp_get_type_string(mtp_packet_hdr->operation) );
+		PRINT_DEBUG("MTP code        : 0x%.4X (%s)", mtp_packet_hdr->code,mtp_get_operation_string(mtp_packet_hdr->code));
+		PRINT_DEBUG("MTP Tx ID       : 0x%.8X", mtp_packet_hdr->tx_id);
 
 		if( mtp_packet_hdr->length != size )
 		{
-			PRINT_DEBUG("Header Packet size and rawsize are not equal !: %d != %d\n",mtp_packet_hdr->length,size);
+			PRINT_DEBUG("Header Packet size and rawsize are not equal !: %d != %d",mtp_packet_hdr->length,size);
 		}
 
 		PRINT_DEBUG("Header : ");
 		PRINT_DEBUG_BUF(ctx->rdbuffer, sizeof(MTP_PACKET_HEADER));
-		PRINT_DEBUG("\n");
 
 		PRINT_DEBUG("Payload : ");
 		PRINT_DEBUG_BUF(ctx->rdbuffer + sizeof(MTP_PACKET_HEADER),size - sizeof(MTP_PACKET_HEADER));
-		PRINT_DEBUG("\n");
 
 		process_in_packet(ctx,mtp_packet_hdr,size);
 
@@ -917,7 +1021,7 @@ int mtp_incoming_packet(mtp_ctx * ctx)
 	}
 	else
 	{
-		PRINT_ERROR("incoming_packet : Read Error (%d)!\n",size);
+		PRINT_ERROR("incoming_packet : Read Error (%d)!",size);
 	}
 
 	return -1;
@@ -929,12 +1033,11 @@ void mtp_set_usb_handle(mtp_ctx * ctx, void * handle, uint32_t max_packet_size)
 	ctx->max_packet_size = max_packet_size;
 }
 
-
 uint32_t mtp_add_storage(mtp_ctx * ctx, char * path, char * description)
 {
 	int i;
 
-	PRINT_DEBUG("mtp_add_storage : %s\n", path );
+	PRINT_DEBUG("mtp_add_storage : %s", path );
 
 	i = 0;
 	while(i < MAX_STORAGE_NB)
@@ -950,7 +1053,7 @@ uint32_t mtp_add_storage(mtp_ctx * ctx, char * path, char * description)
 				strcpy(ctx->storages[i].description,description);
 
 				ctx->storages[i].storage_id = i + 1;
-				PRINT_DEBUG("mtp_add_storage : Storage %.8X mapped to %s (%s)\n",
+				PRINT_DEBUG("mtp_add_storage : Storage %.8X mapped to %s (%s)",
 					    ctx->storages[i].storage_id,
 					    ctx->storages[i].root_path,
 					    ctx->storages[i].description );
@@ -981,7 +1084,7 @@ char * mtp_get_storage_root(mtp_ctx * ctx, uint32_t storage_id)
 {
 	int i;
 
-	PRINT_DEBUG("mtp_get_storage_root : %.8X\n", storage_id );
+	PRINT_DEBUG("mtp_get_storage_root : %.8X", storage_id );
 
 	i = 0;
 	while(i < MAX_STORAGE_NB)
@@ -990,7 +1093,7 @@ char * mtp_get_storage_root(mtp_ctx * ctx, uint32_t storage_id)
 		{
 			if( ctx->storages[i].storage_id == storage_id )
 			{
-				PRINT_DEBUG("mtp_get_storage_root : %.8X -> %s\n",
+				PRINT_DEBUG("mtp_get_storage_root : %.8X -> %s",
 					    storage_id,
 					    ctx->storages[i].root_path );
 				return ctx->storages[i].root_path;
@@ -1006,7 +1109,7 @@ char * mtp_get_storage_description(mtp_ctx * ctx, uint32_t storage_id)
 {
 	int i;
 
-	PRINT_DEBUG("mtp_get_storage_description : %.8X\n", storage_id );
+	PRINT_DEBUG("mtp_get_storage_description : %.8X", storage_id );
 
 	i = 0;
 	while(i < MAX_STORAGE_NB)
@@ -1015,7 +1118,7 @@ char * mtp_get_storage_description(mtp_ctx * ctx, uint32_t storage_id)
 		{
 			if( ctx->storages[i].storage_id == storage_id )
 			{
-				PRINT_DEBUG("mtp_get_storage_description : %.8X -> %s\n",
+				PRINT_DEBUG("mtp_get_storage_description : %.8X -> %s",
 					    storage_id,
 					    ctx->storages[i].description );
 				return ctx->storages[i].description;
@@ -1027,3 +1130,20 @@ char * mtp_get_storage_description(mtp_ctx * ctx, uint32_t storage_id)
 	return NULL;
 }
 
+int mtp_push_event(mtp_ctx * ctx, uint32_t event, int nbparams, uint32_t * parameters )
+{
+	unsigned char event_buffer[64];
+	int size;
+	int ret;
+
+	size = build_event_dataset( ctx, event_buffer, sizeof(event_buffer), event , ctx->session_id, 0x00000000, nbparams, parameters);
+
+	PRINT_DEBUG("mtp_push_event : Event packet buffer - %d Bytes :",size);
+	PRINT_DEBUG_BUF(event_buffer, size);
+
+	ret = write_usb(ctx->usb_ctx,EP_DESCRIPTOR_INT_IN,event_buffer,size);
+
+	PRINT_DEBUG("write_usb return: %d", ret );
+
+	return ret;
+}

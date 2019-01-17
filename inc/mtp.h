@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 Viveris Technologies
+ * Copyright (c) 2018 - 2019 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -51,8 +51,8 @@ typedef struct mtp_usb_cfg_
 	uint8_t  usb_subclass;
 	uint8_t  usb_protocol;
 	uint16_t usb_dev_version;
-
 	uint16_t usb_max_packet_size;
+	uint8_t  usb_functionfs_mode;
 
 	char usb_device_path[MAX_CFG_STRING_SIZE];
 	char usb_endpoint_in[MAX_CFG_STRING_SIZE];
@@ -67,6 +67,8 @@ typedef struct mtp_usb_cfg_
 
 	int wait_connection;
 	int loop_on_disconnect;
+
+	int show_hidden_files;
 
 }mtp_usb_cfg;
 
@@ -101,6 +103,12 @@ typedef struct mtp_ctx_
 
 	mtp_storage storages[MAX_STORAGE_NB];
 
+	int inotify_fd;
+	pthread_t inotify_thread;
+	pthread_mutex_t inotify_mutex;
+
+	int no_inotify;
+
 }mtp_ctx;
 
 mtp_ctx * mtp_init_responder();
@@ -114,8 +122,10 @@ uint32_t mtp_add_storage(mtp_ctx * ctx, char * path, char * description);
 char * mtp_get_storage_description(mtp_ctx * ctx, uint32_t storage_id);
 char * mtp_get_storage_root(mtp_ctx * ctx, uint32_t storage_id);
 
+int mtp_push_event(mtp_ctx * ctx, uint32_t event, int nbparams, uint32_t * parameters );
+
 void mtp_deinit_responder(mtp_ctx * ctx);
 
-#define APP_VERSION "v0.8.1"
+#define APP_VERSION "v0.9.7"
 
 #endif

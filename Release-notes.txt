@@ -1,0 +1,45 @@
+=================================================
+* uMTP Responder
+* Copyright (c) 2018 - 2019 Viveris Technologies
+* Release notes
+=================================================
+
+Noteworthy changes in release v0.9.7 (2019-1-10)
+=================================================
+
+* MTP event support added :
+
+    * The MTP initiator is now notified when files/folders are removed or added from the responder.
+
+* Various debug messages fixes and improvements.
+
+Noteworthy changes in release v0.9.2 (2018-12-5)
+=================================================
+
+* Generic FunctionFS/libcomposite support added !
+
+* New configuration option : show/hide hidden files option.
+
+* It now follows the symbolic links.
+
+Noteworthy changes in release v0.8.6 (2018-6-30)
+=================================================
+
+* Daemon mode :
+
+    * New "loop_on_disconnect" config file option.
+
+* Bug fixes / Improvements :
+
+    * Windows host : Non-empty folder deletion issue fixed.
+
+    * Severals memory leaks in daemon mode fixed.
+
+    * GadgetFS init/deinit reworked.
+
+Noteworthy changes in release v0.8.1 (2018-5-9)
+=================================================
+
+* Initial release.
+
+    Tested on Raspberry Pi Zero and Atmel Sama5D2 Xplained boards.

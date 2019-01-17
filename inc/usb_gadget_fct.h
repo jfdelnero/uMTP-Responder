@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 Viveris Technologies
+ * Copyright (c) 2018 - 2019 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -19,7 +19,7 @@
 
 /**
  * @file   usb_gadget_fct.h
- * @brief  USB gadget layer - Public functions declarations.
+ * @brief  USB gadget / FunctionFS layer - Public functions declarations.
  * @author Jean-François DEL NERO <Jean-Francois.DELNERO@viveris.fr>
  */
 
@@ -31,9 +31,10 @@
 usb_gadget * init_usb_mtp_gadget(mtp_ctx * ctx);
 
 int read_usb(usb_gadget * ctx, unsigned char * buffer, int maxsize);
-int write_usb(usb_gadget * ctx, unsigned char * buffer, int size);
+int write_usb(usb_gadget * ctx, int channel, unsigned char * buffer, int size);
 
 int handle_ep0(usb_gadget * ctx);
+int handle_ffs_ep0(usb_gadget * ctx);
 int is_usb_up(usb_gadget * ctx);
 
 void deinit_usb_mtp_gadget(usb_gadget * usbctx);

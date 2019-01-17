@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 Viveris Technologies
+ * Copyright (c) 2018 - 2019 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -105,7 +105,7 @@ int build_storageinfo_dataset(mtp_ctx * ctx,void * buffer, int maxsize,uint32_t 
 		}
 		else
 		{
-			PRINT_WARN("Failed to get statvfs for %s\n", storage_path);
+			PRINT_WARN("Failed to get statvfs for %s", storage_path);
 		}
 
 		poke(buffer, &ofs, 4, totalspace&0x00000000FFFFFFFF);                       // Max Capacity
@@ -123,7 +123,7 @@ int build_storageinfo_dataset(mtp_ctx * ctx,void * buffer, int maxsize,uint32_t 
 	}
 	else
 	{
-		PRINT_WARN("build_storageinfo_dataset : Storage not found ! (0x%.8X)\n", storageid);
+		PRINT_WARN("build_storageinfo_dataset : Storage not found ! (0x%.8X)", storageid);
 	}
 
 	return ofs;
@@ -201,5 +201,27 @@ int build_objectinfo_dataset(mtp_ctx * ctx, void * buffer, int maxsize,fs_entry 
 	{
 		free(path);
 	}
+	return ofs;
+}
+
+int build_event_dataset(mtp_ctx * ctx, void * buffer, int maxsize, uint32_t event, uint32_t session, uint32_t transaction, int nbparams, uint32_t * parameters)
+{
+	int ofs,i;
+
+	ofs = 0;
+
+	poke(buffer, &ofs, 4, 0);                                            // Size
+	poke(buffer, &ofs, 2, MTP_CONTAINER_TYPE_EVENT);                     // Type
+	poke(buffer, &ofs, 2, event );                                       // Event Code
+	poke(buffer, &ofs, 4, ctx->session_id);                              // MTP Session ID
+	for(i=0;i<nbparams;i++)
+	{
+		poke(buffer, &ofs, 4, parameters[i]);
+	}
+
+	// Update size
+	i = 0;
+	poke(buffer, &i, 4, ofs);
+
 	return ofs;
 }

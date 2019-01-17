@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 Viveris Technologies
+ * Copyright (c) 2018 - 2019 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -35,12 +35,111 @@
 #include "logs_out.h"
 #include "fs_handles_db.h"
 #include "mtp.h"
+#include "inotify.h"
+
+int fs_remove_tree( char *folder )
+{
+	struct dirent *d;
+	DIR * dir;
+	struct stat fileStat;
+	char * tmpstr;
+	int del_fail;
+
+	del_fail = 0;
+
+	dir = opendir (folder);
+	if( dir )
+	{
+		do
+		{
+			d = readdir (dir);
+			if( d )
+			{
+				tmpstr = malloc (strlen(folder) + strlen(d->d_name) + 4 );
+				if( tmpstr )
+				{
+					strcpy(tmpstr,folder);
+					strcat(tmpstr,"/");
+					strcat(tmpstr,d->d_name);
+
+					memset(&fileStat,0,sizeof(struct stat));
+					if( !lstat (tmpstr, &fileStat) )
+					{
+						if ( S_ISDIR ( fileStat.st_mode ) )
+						{
+							if( strcmp(d->d_name,"..") && strcmp(d->d_name,".") )
+							{
+								if( fs_remove_tree(tmpstr) )
+									del_fail = 1;
+							}
+						}
+						else
+						{
+							if( remove(tmpstr) )
+								del_fail = 1;
+						}
+					}
+
+					free(tmpstr);
+				}
+				else
+				{
+					del_fail = 1;
+				}
+			}
+		}while(d);
+
+		closedir(dir);
+
+		if( remove(folder) )
+			del_fail = 1;
+	}
+	else
+	{
+		del_fail = 1;
+	}
+
+	return del_fail;
+}
+
+int fs_entry_stat(char *path, filefoundinfo* fileinfo)
+{
+	struct stat fileStat;
+	int i;
+
+	memset(&fileStat,0,sizeof(struct stat));
+	if( !stat (path, &fileStat) )
+	{
+		if ( S_ISDIR ( fileStat.st_mode ) )
+			fileinfo->isdirectory = 1;
+		else
+			fileinfo->isdirectory = 0;
+
+		fileinfo->size = fileStat.st_size;
+
+		i = strlen(path);
+		while( i )
+		{
+			if( path[i] == '/' )
+			{
+				i++;
+				break;
+			}
+			i--;
+		}
+
+		strncpy(fileinfo->filename,&path[i],256);
+
+		return 1;
+	}
+
+	return 0;
+}
 
 DIR * fs_find_first_file(char *folder, filefoundinfo* fileinfo)
 {
 	struct dirent *d;
 	DIR * dir;
-	struct stat fileStat;
 	char * tmpstr;
 
 	dir = opendir (folder);
@@ -56,20 +155,11 @@ DIR * fs_find_first_file(char *folder, filefoundinfo* fileinfo)
 				strcat(tmpstr,"/");
 				strcat(tmpstr,d->d_name);
 
-				memset(&fileStat,0,sizeof(struct stat));
-				if( !lstat (tmpstr, &fileStat) )
+				if( fs_entry_stat(tmpstr, fileinfo) )
 				{
-					if ( S_ISDIR ( fileStat.st_mode ) )
-						fileinfo->isdirectory = 1;
-					else
-						fileinfo->isdirectory = 0;
-
-					fileinfo->size = fileStat.st_size;
-
-					strncpy(fileinfo->filename,d->d_name,256);
-
 					free(tmpstr);
 					return (void*)dir;
+
 				}
 
 				free(tmpstr);
@@ -95,7 +185,6 @@ int fs_find_next_file(DIR* dir, char *folder, filefoundinfo* fileinfo)
 {
 	int ret;
 	struct dirent *d;
-	struct stat fileStat;
 	char * tmpstr;
 
 	d = readdir (dir);
@@ -111,16 +200,8 @@ int fs_find_next_file(DIR* dir, char *folder, filefoundinfo* fileinfo)
 			strcat(tmpstr,"/");
 			strcat(tmpstr,d->d_name);
 
-			if( !lstat (tmpstr, &fileStat) )
+			if( fs_entry_stat( tmpstr, fileinfo ) )
 			{
-				if ( S_ISDIR ( fileStat.st_mode ) )
-					fileinfo->isdirectory = 1;
-				else
-					fileinfo->isdirectory = 0;
-
-				fileinfo->size=fileStat.st_size;
-				strncpy(fileinfo->filename,d->d_name,256);
-
 				ret = 1;
 				free(tmpstr);
 				return ret;
@@ -145,6 +226,8 @@ fs_handles_db * init_fs_db(void * mtp_ctx)
 {
 	fs_handles_db * db;
 
+	PRINT_DEBUG("init_fs_db called");
+
 	db = (fs_handles_db *)malloc(sizeof(fs_handles_db));
 	if( db )
 	{
@@ -160,11 +243,20 @@ void deinit_fs_db(fs_handles_db * fsh)
 {
 	fs_entry * next_entry;
 
+	PRINT_DEBUG("deinit_fs_db called");
+
 	if( fsh )
 	{
 		while( fsh->entry_list )
 		{
 			next_entry = fsh->entry_list->next;
+
+			if( fsh->entry_list->watch_descriptor != -1 )
+			{
+				// Disable the inotify watch point
+				inotify_handler_rmwatch( fsh->mtp_ctx, fsh->entry_list->watch_descriptor );
+				fsh->entry_list->watch_descriptor = -1;
+			}
 
 			if( fsh->entry_list->name )
 				free( fsh->entry_list->name );
@@ -224,6 +316,8 @@ fs_entry * alloc_entry(fs_handles_db * db, filefoundinfo *fileinfo, uint32_t par
 
 		entry->size = fileinfo->size;
 
+		entry->watch_descriptor = -1;
+
 		if( fileinfo->isdirectory )
 			entry->flags = ENTRY_IS_DIR;
 		else
@@ -257,6 +351,9 @@ fs_entry * alloc_root_entry(fs_handles_db * db, uint32_t storage_id)
 		}
 
 		entry->size = 1;
+
+		entry->watch_descriptor = -1;
+
 		entry->flags = ENTRY_IS_DIR;
 
 		entry->next = db->entry_list;
@@ -276,12 +373,12 @@ fs_entry * add_entry(fs_handles_db * db, filefoundinfo *fileinfo, uint32_t paren
 	if( entry )
 	{
 		// entry already there...
-		PRINT_DEBUG("add_entry : File already present (%s)\n",fileinfo->filename);
+		PRINT_DEBUG("add_entry : File already present (%s)",fileinfo->filename);
 	}
 	else
 	{
 		// add the entry
-		PRINT_DEBUG("add_entry : File not present - add entry (%s)\n",fileinfo->filename);
+		PRINT_DEBUG("add_entry : File not present - add entry (%s)",fileinfo->filename);
 
 		entry = alloc_entry( db, fileinfo, parent, storage_id);
 	}
@@ -292,26 +389,27 @@ fs_entry * add_entry(fs_handles_db * db, filefoundinfo *fileinfo, uint32_t paren
 int scan_and_add_folder(fs_handles_db * db, char * base, uint32_t parent, uint32_t storage_id)
 {
 	fs_entry * entry;
-    char * path;
+	char * path;
 	DIR* dir;
-    int ret;
+	int ret;
 	filefoundinfo fileinfo;
 	struct stat entrystat;
 
-	PRINT_DEBUG("scan_and_add_folder : %s, Parent : 0x%.8X, Storage ID : 0x%.8X\n",base,parent,storage_id);
+	PRINT_DEBUG("scan_and_add_folder : %s, Parent : 0x%.8X, Storage ID : 0x%.8X",base,parent,storage_id);
 
 	dir = fs_find_first_file(base, &fileinfo);
 	if( dir )
 	{
 		do
 		{
-			PRINT_DEBUG("---------------------\n");
-			PRINT_DEBUG("File : %s\n",fileinfo.filename);
-			PRINT_DEBUG("Size : %d\n",fileinfo.size);
-			PRINT_DEBUG("IsDir: %d\n",fileinfo.isdirectory);
-			PRINT_DEBUG("---------------------\n");
+			PRINT_DEBUG("---------------------");
+			PRINT_DEBUG("File : %s",fileinfo.filename);
+			PRINT_DEBUG("Size : %d",fileinfo.size);
+			PRINT_DEBUG("IsDir: %d",fileinfo.isdirectory);
+			PRINT_DEBUG("---------------------");
 
-			if( strcmp(fileinfo.filename,"..") && strcmp(fileinfo.filename,".") )
+			if( strcmp(fileinfo.filename,"..") && strcmp(fileinfo.filename,".") && \
+				(((mtp_ctx *)db->mtp_ctx)->usb_cfg.show_hidden_files || fileinfo.filename[0] != '.') )
 			{
 				add_entry(db, &fileinfo, parent, storage_id);
 			}
@@ -320,32 +418,37 @@ int scan_and_add_folder(fs_handles_db * db, char * base, uint32_t parent, uint32
 		fs_find_close(dir);
 	}
 
-    // Scan the DB to find and remove deleted files...
-    init_search_handle(db, parent, storage_id);
-    do
-    {
-        entry = get_next_child_handle(db);
-        if(entry)
-        {
-            path = build_full_path(db, mtp_get_storage_root(db->mtp_ctx, entry->storage_id), entry);
+	// Scan the DB to find and remove deleted files...
+	init_search_handle(db, parent, storage_id);
+	do
+	{
+		entry = get_next_child_handle(db);
+		if(entry)
+		{
+			path = build_full_path(db, mtp_get_storage_root(db->mtp_ctx, entry->storage_id), entry);
 
-            if(path)
-            {
-                ret = stat(path, &entrystat);
-                if(ret)
-                {
-                    PRINT_DEBUG("scan_and_add_folder : discard entry %s - stat error\n", path);
-                    entry->flags |= ENTRY_IS_DELETED;
-                }
-                else
-                {
-                    entry->size = entrystat.st_size;
-                }
+			if(path)
+			{
+				ret = stat(path, &entrystat);
+				if(ret)
+				{
+					PRINT_DEBUG("scan_and_add_folder : discard entry %s - stat error", path);
+					entry->flags |= ENTRY_IS_DELETED;
+					if( entry->watch_descriptor != -1 )
+					{
+						inotify_handler_rmwatch( db->mtp_ctx, entry->watch_descriptor );
+						entry->watch_descriptor = -1;
+					}
+				}
+				else
+				{
+					entry->size = entrystat.st_size;
+				}
 
-                free(path);
-            }
-        }
-    }while(entry);
+				free(path);
+			}
+		}
+	}while(entry);
 
 	return 0;
 }
@@ -485,7 +588,7 @@ char * build_full_path(fs_handles_db * db,char * root_path,fs_entry * entry)
 			memcpy(&full_path[0],root_path,strlen(root_path));
 		}
 
-		PRINT_DEBUG("build_full_path : %s -> %s\n",entry->name, full_path);
+		PRINT_DEBUG("build_full_path : %s -> %s",entry->name, full_path);
 	}
 
 	return full_path;
@@ -504,7 +607,7 @@ FILE * entry_open(fs_handles_db * db, fs_entry * entry)
 		f = fopen(full_path,"rb");
 
 		if(!f)
-			PRINT_DEBUG("entry_open : Can't open %s !\n",full_path);
+			PRINT_DEBUG("entry_open : Can't open %s !",full_path);
 
 		free(full_path);
 	}
@@ -520,9 +623,14 @@ int entry_read(fs_handles_db * db, FILE * f, unsigned char * buffer_out, int off
 	{
 		fseek(f,offset,SEEK_SET);
 
-		fread(buffer_out,size,1,f);
-
-		totalread = ftell(f) - offset;
+		if( fread(buffer_out,size,1,f) > 0 )
+		{
+			totalread = ftell(f) - offset;
+		}
+		else
+		{
+			totalread = 0;
+		}
 
 		return totalread;
 	}
@@ -536,3 +644,21 @@ void entry_close(FILE * f)
 		fclose(f);
 }
 
+fs_entry * get_entry_by_wd( fs_handles_db * db, int watch_descriptor )
+{
+	fs_entry * entry_list;
+
+	entry_list = db->entry_list;
+
+	while( entry_list )
+	{
+		if( !( entry_list->flags & ENTRY_IS_DELETED ) && ( entry_list->watch_descriptor == watch_descriptor ) )
+		{
+			return entry_list;
+		}
+
+		entry_list = entry_list->next;
+	}
+
+	return 0;
+}

@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 Viveris Technologies
+ * Copyright (c) 2018 - 2019 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -59,6 +59,7 @@ enum
 	USBPROTOCOL_CMD,
 	USBDEVVERSION_CMD,
 	USBMAXPACKETSIZE_CMD,
+	USBFUNCTIONFSMODE_CMD,
 
 	USB_DEV_PATH_CMD,
 	USB_EPIN_PATH_CMD,
@@ -71,7 +72,12 @@ enum
 	INTERFACE_STRING_CMD,
 
 	WAIT_CONNECTION,
-	LOOP_ON_DISCONNECT
+	LOOP_ON_DISCONNECT,
+
+	SHOW_HIDDEN_FILES,
+
+	NO_INOTIFY
+
 };
 
 typedef struct kw_list_
@@ -271,6 +277,10 @@ int get_hex_param(mtp_ctx * context, char * line,int cmd)
 				context->usb_cfg.usb_max_packet_size = param_value;
 			break;
 
+			case USBFUNCTIONFSMODE_CMD:
+				context->usb_cfg.usb_functionfs_mode = param_value;
+			break;
+
 			case WAIT_CONNECTION:
 				context->usb_cfg.wait_connection = param_value;
 			break;
@@ -278,6 +288,15 @@ int get_hex_param(mtp_ctx * context, char * line,int cmd)
 			case LOOP_ON_DISCONNECT:
 				context->usb_cfg.loop_on_disconnect = param_value;
 			break;
+
+			case SHOW_HIDDEN_FILES:
+				context->usb_cfg.show_hidden_files = param_value;
+			break;
+
+			case NO_INOTIFY:
+				context->no_inotify = param_value;
+			break;
+
 		}
 	}
 
@@ -342,6 +361,7 @@ kw_list kwlist[] =
 	{"usb_protocol",        get_hex_param,      USBPROTOCOL_CMD},
 	{"usb_dev_version",     get_hex_param,      USBDEVVERSION_CMD},
 	{"usb_max_packet_size", get_hex_param,      USBMAXPACKETSIZE_CMD},
+	{"usb_functionfs_mode", get_hex_param,      USBFUNCTIONFSMODE_CMD},
 
 	{"usb_dev_path",        get_str_param,      USB_DEV_PATH_CMD},
 	{"usb_epin_path",       get_str_param,      USB_EPIN_PATH_CMD},
@@ -354,6 +374,11 @@ kw_list kwlist[] =
 
 	{"wait",                get_hex_param,      WAIT_CONNECTION},
 	{"loop_on_disconnect",  get_hex_param,      LOOP_ON_DISCONNECT},
+
+	{"show_hidden_files",   get_hex_param,      SHOW_HIDDEN_FILES},
+
+	{"no_inotify",          get_hex_param,      NO_INOTIFY},
+
 	{ 0, 0, 0 }
 };
 
@@ -424,18 +449,26 @@ int mtp_load_config_file(mtp_ctx * context)
 	context->usb_cfg.usb_protocol        = USB_DEV_PROTOCOL;
 	context->usb_cfg.usb_dev_version     = USB_DEV_VERSION;
 	context->usb_cfg.usb_max_packet_size = MAX_PACKET_SIZE;
+	context->usb_cfg.usb_functionfs_mode = USB_FFS_MODE;
 
 	context->usb_cfg.wait_connection = 0;
 	context->usb_cfg.loop_on_disconnect = 0;
+
+	context->usb_cfg.show_hidden_files = 1;
+
+	context->no_inotify = 0;
 
 	f = fopen(UMTPR_CONF_FILE,"r");
 	if(f)
 	{
 		do
 		{
-			fgets(line,sizeof(line),f);
+			if(!fgets(line,sizeof(line),f))
+				break;
+
 			if(feof(f))
 				break;
+
 			execute_line(context, line);
 		}while(1);
 
@@ -464,8 +497,19 @@ int mtp_load_config_file(mtp_ctx * context)
 	PRINT_MSG("USB Protocol ID : 0x%.2X",context->usb_cfg.usb_protocol);
 	PRINT_MSG("USB Device version : 0x%.4X",context->usb_cfg.usb_dev_version);
 
+	if(context->usb_cfg.usb_functionfs_mode)
+	{
+		PRINT_MSG("USB FunctionFS Mode");
+	}
+	else
+	{
+		PRINT_MSG("USB GadgetFS Mode");
+	}
+
 	PRINT_MSG("Wait for connection : %i",context->usb_cfg.wait_connection);
 	PRINT_MSG("Loop on disconnect : %i",context->usb_cfg.loop_on_disconnect);
+	PRINT_MSG("Show hidden files : %i",context->usb_cfg.show_hidden_files);
+	PRINT_MSG("inotify : %s",context->no_inotify?"no":"yes");
 
 	return err;
 }

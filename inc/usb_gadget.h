@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 Viveris Technologies
+ * Copyright (c) 2018 - 2019 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -28,6 +28,8 @@
 
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadgetfs.h>
+#include <linux/usb/functionfs.h>
+
 #include <pthread.h>
 #include "usbstring.h"
 
@@ -40,42 +42,52 @@ enum
 	EP_NB_OF_DESCRIPTORS
 };
 
-/* USB_DT_ENDPOINT: Endpoint descriptor */
-// TODO : Find a better solution than redefine this structure to remove the audio related members ...
-struct usb_endpoint_descriptor_noaudio {
-	uint8_t  bLength;
-	uint8_t  bDescriptorType;
-
-	uint8_t  bEndpointAddress;
-	uint8_t  bmAttributes;
-	uint16_t wMaxPacketSize;
-	uint8_t  bInterval;
-
-} __attribute__ ((packed));
-
-
+// Direct GadgetFS mode
 typedef struct _usb_cfg
 {
 	uint32_t head;
 
 	struct usb_config_descriptor cfg;
 	struct usb_interface_descriptor if_desc;
-	struct usb_endpoint_descriptor_noaudio ep_desc[3];
+	struct usb_endpoint_descriptor_no_audio ep_desc[3];
 
 	struct usb_config_descriptor cfg_hs;
 	struct usb_interface_descriptor if_desc_hs;
-	struct usb_endpoint_descriptor_noaudio ep_desc_hs[3];
+	struct usb_endpoint_descriptor_no_audio ep_desc_hs[3];
 
 	struct usb_device_descriptor dev_desc;
 
 } __attribute__ ((packed)) usb_cfg;
 
+// FunctionFS mode
+typedef struct _usb_ffs_cfg
+{
+	uint32_t magic;
+	uint32_t length;
+	uint32_t flags;
+	uint32_t fs_count;
+	uint32_t hs_count;
+
+	struct usb_interface_descriptor if_desc;
+	struct usb_endpoint_descriptor_no_audio ep_desc[3];
+
+	struct usb_interface_descriptor if_desc_hs;
+	struct usb_endpoint_descriptor_no_audio ep_desc_hs[3];
+
+} __attribute__ ((packed)) usb_ffs_cfg;
+
+typedef struct _ffs_strings
+{
+	struct usb_functionfs_strings_head header;
+	uint16_t code;
+	char string_data[128]; // string data.
+} __attribute__((packed)) ffs_strings;
 
 typedef struct _ep_cfg
 {
 	uint32_t head;
 
-	struct usb_endpoint_descriptor_noaudio ep_desc[2];
+	struct usb_endpoint_descriptor_no_audio ep_desc[2];
 
 } __attribute__ ((packed)) ep_cfg;
 
@@ -96,6 +108,8 @@ typedef struct _usb_gadget
 	int usb_device;
 
 	usb_cfg * usb_config;
+	usb_ffs_cfg * usb_ffs_config;
+
 	ep_cfg *  ep_config[3];
 
 	int ep_handles[EP_NB_OF_DESCRIPTORS];
@@ -108,7 +122,7 @@ typedef struct _usb_gadget
 
 	int wait_connection;
 	pthread_t thread;
-	int thread_started;
+	int thread_not_started;
 
 }usb_gadget;
 

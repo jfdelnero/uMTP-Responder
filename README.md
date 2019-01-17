@@ -17,7 +17,7 @@ The uMTP-Responder allows files to be transferred to and from devices through th
 
 - As few dependencies as possible.
 
-- Hook to the Gadget FS Linux layer.
+- Hook to the FunctionFS/libcomposite or the GadgetFS Linux layer.
 
 - Dynamic handles allocation (No file-system pre-scan).
 
@@ -39,13 +39,15 @@ The uMTP-Responder allows files to be transferred to and from devices through th
 
 - Up to 16 storage instances supported.
 
-### What is planned
-
-- libcomposite support.
+- GadgetFS and FunctionFS/libcomposite modes supported.
 
 ## Which platforms are supported ?
 
-Any board with a USB device port should be compatible. The only requirement is to have the USB Gadget FS support enabled in your Linux kernel.
+Any board with a USB device port should be compatible. The only requirement is to have the USB FunctionFS (CONFIG_USB_FUNCTIONFS) or GadgetFS (CONFIG_USB_GADGETFS) support enabled in your Linux kernel.
+You also need to enable the board-specific USB device port driver (eg. dwc2 for the RaspberryPi Zero).
+
+uMTP-Responder is currently tested with various 4.x.x Linux kernel versions.
+This may work with earlier kernels (v3.x.x and some v2.6.x versions) but without any guarantee.
 
 ### Boards successfully tested
 
@@ -57,14 +59,40 @@ Any board with a USB device port should be compatible. The only requirement is t
 
 - Allwinner SoC based board.
 
+- Freescale i.MX6 SabreSD. (Kernel v4.14)
+
+- Samsung Artik710. (FunctionFS mode)
+
 ### Client operating systems successfully tested
 
 - Windows 7, Windows 10, Linux.
 
 ## How to build it ?
 
-A simple "make" should be enough. If you are using a cross-compile environment, set the "CC" variable to your GCC cross compiler.
- 
+A simple "make" should be enough if you build uMTPrd directly on the target.
+
+If you are using a cross-compile environment, set the "CC" variable to your GCC cross compiler.
+
+You can also enable the syslog support with the C flag "USE_SYSLOG" and the verbose/debug output with the "DEBUG" C flag.
+
+examples:
+
+On a cross-compile environment :
+
+```c
+make CC=armv6j-hardfloat-linux-gnueabi-gcc
+```
+
+On a cross-compile environment with both syslog support and debug output options enabled :
+
+```c
+make CC=armv6j-hardfloat-linux-gnueabi-gcc CFLAGS="-DUSE_SYSLOG -DDEBUG"
+```
+
+Note: syslog support and debug output options can be enabled separately.
+
+(replace "armv6j-hardfloat-linux-gnueabi-gcc" with your target gcc cross-compiler)
+
 ## How to set it up ?
 
 A config file should copied into the folder /etc/umtprd/umtprd.conf
@@ -73,9 +101,8 @@ Check the file [umtprd.conf](conf/umtprd.conf) file for details on available opt
 
 ## How to launch it ?
 
-Once you have configured the correct settings in umtprd.conf, you can use umtprd.sh to launch it or use udev to launch the deamon when the usb device port is connected.
+Once you have configured the correct settings in umtprd.conf, you can use umtprd_ffs.sh or umtprd_gfs.sh to launch it in FunctionFS/GadgetFS mode or use udev to launch the deamon when the usb device port is connected.
 
 ## License
 
 This project is licensed under the GNU General Public License version 3 - see the [LICENSE](LICENSE) file for details
-

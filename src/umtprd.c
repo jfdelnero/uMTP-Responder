@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 Viveris Technologies
+ * Copyright (c) 2018 - 2019 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -50,7 +50,7 @@ void* io_thread(void* arg)
 	while (is_usb_up(ctx))
 	{
 		ret = mtp_incoming_packet(mtp_context);
-		if(ret == -1)
+		if(ret < 0)
 		{
 			ctx->stop = 1;
 		}
@@ -61,7 +61,7 @@ void* io_thread(void* arg)
 
 int main(int argc, char *argv[])
 {
-	usb_gadget * usb_contex;
+	usb_gadget * usb_ctx;
 	int retcode = 0;
 	int loop_continue = 0;
 
@@ -71,7 +71,7 @@ int main(int argc, char *argv[])
 	PRINT_MSG("Version: %s compiled the %s@%s", APP_VERSION,
 		  __DATE__, __TIME__);
 
-	PRINT_MSG("(c) 2018 Viveris Technologies");
+	PRINT_MSG("(c) 2018 - 2019 Viveris Technologies");
 
 	mtp_context = mtp_init_responder();
 	if(!mtp_context)
@@ -83,15 +83,23 @@ int main(int argc, char *argv[])
 
 	loop_continue = mtp_context->usb_cfg.loop_on_disconnect;
 
-
-	while(loop_continue)
+	do
 	{
-		usb_contex = init_usb_mtp_gadget(mtp_context);
-		if(usb_contex)
+		usb_ctx = init_usb_mtp_gadget(mtp_context);
+		if(usb_ctx)
 		{
-			mtp_set_usb_handle(mtp_context, usb_contex, mtp_context->usb_cfg.usb_max_packet_size);
-			handle_ep0(usb_contex);
-			deinit_usb_mtp_gadget(usb_contex);
+			mtp_set_usb_handle(mtp_context, usb_ctx, mtp_context->usb_cfg.usb_max_packet_size);
+			if( mtp_context->usb_cfg.usb_functionfs_mode )
+			{
+				PRINT_DEBUG("uMTP Responder : FunctionFS Mode - entering handle_ffs_ep0");
+				handle_ffs_ep0(usb_ctx);
+			}
+			else
+			{
+				PRINT_DEBUG("uMTP Responder : GadgetFS Mode - entering handle_ep0");
+				handle_ep0(usb_ctx);
+			}
+			deinit_usb_mtp_gadget(usb_ctx);
 		}
 		else
 		{
@@ -100,8 +108,14 @@ int main(int argc, char *argv[])
 			loop_continue = 0;
 		}
 
-		PRINT_MSG("Disconnected");
-	}
+		PRINT_MSG("uMTP Responder : Disconnected");
+
+		if(mtp_context->fs_db)
+		{
+			deinit_fs_db(mtp_context->fs_db);
+			mtp_context->fs_db = 0;
+		}
+	}while(loop_continue);
 
 	mtp_deinit_responder(mtp_context);
 

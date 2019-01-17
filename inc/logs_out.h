@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 Viveris Technologies
+ * Copyright (c) 2018 - 2019 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -41,15 +41,15 @@
 
 #ifdef USE_SYSLOG // Syslog usage
 
-#define PRINT_MSG(fmt, args...) syslog(LOG_NOTICE, "[Info] " fmt "\n", \
+#define PRINT_MSG(fmt, args...) syslog(LOG_NOTICE, "[uMTPrd - Info] " fmt "\n", \
                                          ## args)
-#define PRINT_ERROR(fmt, args...)   syslog(LOG_ERR, "[Error] " fmt "\n", \
+#define PRINT_ERROR(fmt, args...)   syslog(LOG_ERR, "[uMTPrd - Error] " fmt "\n", \
                                          ## args)
-#define PRINT_WARN(fmt, args...)    syslog(LOG_WARNING, "[Warning] " fmt "\n", \
+#define PRINT_WARN(fmt, args...)    syslog(LOG_WARNING, "[uMTPrd - Warning] " fmt "\n", \
                                          ## args)
 #ifdef DEBUG
 
-#define PRINT_DEBUG(fmt, args...)   syslog(LOG_DEBUG, "[Debug] " fmt "\n",  \
+#define PRINT_DEBUG(fmt, args...)   syslog(LOG_DEBUG, "[uMTPrd - Debug] " fmt "\n",  \
                                          ## args)
 #else
 
@@ -61,19 +61,19 @@
 
 #define PRINT_MSG(fmt, args...)   {                               \
                                     fprintf(stdout,               \
-                                            "[Info] " fmt "\r\n", \
+                                            "[uMTPrd - Info] " fmt "\n", \
                                             ## args);             \
                                     fflush(stdout);               \
                                   }
 #define PRINT_ERROR(fmt, args...) {                                 \
                                     fprintf(stderr,                 \
-                                            "[Error] " fmt "\r\n",  \
+                                            "[uMTPrd - Error] " fmt "\n",  \
                                             ## args);               \
                                     fflush(stderr);                 \
                                   }
 #define PRINT_WARN(fmt, args...)  {                                 \
                                     fprintf(stdout,                 \
-                                            "[Warning] " fmt "\r\n",\
+                                            "[uMTPrd - Warning] " fmt "\n",\
                                             ## args);               \
                                     fflush(stdout);                 \
                                   }
@@ -81,7 +81,7 @@
 #ifdef DEBUG
 #define PRINT_DEBUG(fmt, args...) {                                 \
                                     fprintf(stdout,                 \
-                                            "[Debug] " fmt "\r\n",  \
+                                            "[uMTPrd - Debug] " fmt "\n",  \
                                             ## args);               \
                                     fflush(stdout);                 \
                                   }
