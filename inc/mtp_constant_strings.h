@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2019 Viveris Technologies
+ * Copyright (c) 2018 - 2021 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -27,5 +27,7 @@
 extern const char DevInfos_MTP_Extensions[];
 
 const char * mtp_get_operation_string(uint16_t operation);
+const char * mtp_get_property_string(uint16_t property);
+const char * mtp_get_format_string(uint16_t format);
 const char * mtp_get_type_string(uint16_t type);
 #endif

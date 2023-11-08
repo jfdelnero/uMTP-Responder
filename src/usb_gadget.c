@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2019 Viveris Technologies
+ * Copyright (c) 2018 - 2021 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -25,27 +25,33 @@
 
 // GadgetFS support : Main inspiration from Grégory Soutadé (http://blog.soutade.fr/post/2016/07/create-your-own-usb-gadget-with-gadgetfs.html)
 
-#include <sys/ioctl.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/select.h>
+#include "buildconf.h"
 
-#include <linux/types.h>
+#include <endian.h>
+#include <inttypes.h>
+#include <pthread.h>
+#include <sys/time.h>
+#include <sys/select.h>
+#include <sys/ioctl.h>
+
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadgetfs.h>
 
 #include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <unistd.h>
-#include <stdint.h>
 #include <string.h>
-#include <pthread.h>
+#include <stdio.h>
+
+#include <signal.h>
 
 #include <errno.h>
+#ifdef CONFIG_USB_NON_BLOCKING_WRITE
+#include <poll.h>
+#endif
 
 #include "fs_handles_db.h"
 #include "mtp.h"
+#include "mtp_constant.h"
 
 #include "usbstring.h"
 #include "usb_gadget.h"
@@ -64,6 +70,11 @@ static struct usb_gadget_strings strings = {
 extern void* io_thread(void* arg);
 extern mtp_ctx * mtp_context;
 
+typedef struct mtp_device_status_ {
+	uint16_t wLength;
+	uint16_t wCode;
+}mtp_device_status;
+
 int read_usb(usb_gadget * ctx, unsigned char * buffer, int maxsize)
 {
 	int ret;
@@ -80,13 +91,35 @@ int read_usb(usb_gadget * ctx, unsigned char * buffer, int maxsize)
 int write_usb(usb_gadget * ctx, int channel, unsigned char * buffer, int size)
 {
 	int ret;
+#ifdef CONFIG_USB_NON_BLOCKING_WRITE
+	struct pollfd pfd;
+#endif
 
 	ret = -1;
 	if ( channel < EP_NB_OF_DESCRIPTORS )
 	{
-		if(ctx->ep_handles[channel] >= 0 && buffer)
+		if(ctx->ep_handles[channel] >= 0 && buffer && !mtp_context->cancel_req)
 		{
+
+#ifdef CONFIG_USB_NON_BLOCKING_WRITE
+			fcntl(ctx->ep_handles[channel], F_SETFL, fcntl(ctx->ep_handles[channel], F_GETFL) | O_NONBLOCK);
+			do
+			{
+				pfd.fd = ctx->ep_handles[channel];
+				pfd.events = POLLOUT;
+
+				ret = poll(&pfd, 1, 2000);
+				if(ret>0 && !mtp_context->cancel_req)
+				{
+					ret = write (ctx->ep_handles[channel], buffer, size);
+				}
+			}while( ret < 0 && ( (errno == EAGAIN) || (errno == EAGAIN) ) && !mtp_context->cancel_req );
+			fcntl(ctx->ep_handles[channel], F_SETFL, fcntl(ctx->ep_handles[channel], F_GETFL) & ~O_NONBLOCK);
+#else
+
 			ret = write (ctx->ep_handles[channel], buffer, size);
+
+#endif
 		}
 	}
 	return ret;
@@ -175,19 +208,19 @@ void fill_if_descriptor(mtp_ctx * ctx, usb_gadget * usbctx, struct usb_interface
 	return;
 }
 
-
-void fill_ep_descriptor(mtp_ctx * ctx, usb_gadget * usbctx,struct usb_endpoint_descriptor_no_audio * desc,int index,int bulk,int dir, int hs)
+void fill_ep_descriptor(mtp_ctx * ctx, usb_gadget * usbctx,struct usb_endpoint_descriptor_no_audio * desc,int index,unsigned int flags)
 {
 	memset(desc,0,sizeof(struct usb_endpoint_descriptor_no_audio));
 
 	desc->bLength = USB_DT_ENDPOINT_SIZE;
 	desc->bDescriptorType = USB_DT_ENDPOINT;
-	if(!dir)
-		desc->bEndpointAddress = USB_DIR_IN  | (index);
-	else
-		desc->bEndpointAddress = USB_DIR_OUT | (index);
 
-	if(bulk)
+	if(flags & EP_OUT_DIR)
+		desc->bEndpointAddress = USB_DIR_OUT | (index);
+	else
+		desc->bEndpointAddress = USB_DIR_IN  | (index);
+
+	if(flags & EP_BULK_MODE)
 	{
 		desc->bmAttributes = USB_ENDPOINT_XFER_BULK;
 		desc->wMaxPacketSize = ctx->usb_cfg.usb_max_packet_size;
@@ -199,6 +232,19 @@ void fill_ep_descriptor(mtp_ctx * ctx, usb_gadget * usbctx,struct usb_endpoint_d
 		desc->bInterval = 6;
 	}
 
+#if defined(CONFIG_USB_SS_SUPPORT)
+	if(flags & EP_SS_MODE)
+	{
+		ep_cfg_descriptor * ss_descriptor;
+
+		ss_descriptor = (ep_cfg_descriptor *)desc;
+
+		ss_descriptor->ep_desc_comp.bLength = sizeof(struct usb_ss_ep_comp_descriptor);
+		ss_descriptor->ep_desc_comp.bDescriptorType = USB_DT_SS_ENDPOINT_COMP;
+		ss_descriptor->ep_desc_comp.bMaxBurst = 15;
+	}
+#endif
+
 	PRINT_DEBUG("fill_ep_descriptor:");
 	PRINT_DEBUG_BUF(desc, sizeof(struct usb_endpoint_descriptor_no_audio));
 
@@ -208,10 +254,12 @@ void fill_ep_descriptor(mtp_ctx * ctx, usb_gadget * usbctx,struct usb_endpoint_d
 int init_ep(usb_gadget * ctx,int index,int ffs_mode)
 {
 	int fd,ret;
+	void * descriptor_ptr;
+	int descriptor_size;
 
 	PRINT_DEBUG("Init end point %s (%d)",ctx->ep_path[index],index);
 	fd = open(ctx->ep_path[index], O_RDWR);
-	if ( fd <= 0 )
+	if ( fd < 0 )
 	{
 		PRINT_ERROR("init_ep : Endpoint %s (%d) init failed ! : Can't open the endpoint ! (error %d - %m)",ctx->ep_path[index],index,fd);
 		goto init_ep_error;
@@ -221,16 +269,76 @@ int init_ep(usb_gadget * ctx,int index,int ffs_mode)
 
 	ctx->ep_config[index]->head = 1;
 
+	descriptor_size = 0;
+
 	if( ctx->usb_ffs_config )
 	{
-		memcpy(&ctx->ep_config[index]->ep_desc[0], &ctx->usb_ffs_config->ep_desc[index],sizeof(struct usb_endpoint_descriptor_no_audio));
-		memcpy(&ctx->ep_config[index]->ep_desc[1], &ctx->usb_ffs_config->ep_desc[index],sizeof(struct usb_endpoint_descriptor_no_audio));
+#if defined(CONFIG_USB_SS_SUPPORT)
+		descriptor_ptr = (void *)&ctx->usb_ffs_config->ep_desc_ss;
+		descriptor_size = sizeof(ep_cfg_descriptor);
+#elif defined(CONFIG_USB_HS_SUPPORT)
+		descriptor_ptr = (void *)&ctx->usb_ffs_config->ep_desc_hs;
+		descriptor_size = sizeof(struct usb_endpoint_descriptor_no_audio);
+#elif defined(CONFIG_USB_FS_SUPPORT)
+		descriptor_ptr = (void *)&ctx->usb_ffs_config->ep_desc_fs;
+		descriptor_size = sizeof(struct usb_endpoint_descriptor_no_audio);
+#else
+
+#error Configuration Error ! At least one USB mode support must be enabled ! (CONFIG_USB_FS_SUPPORT/CONFIG_USB_HS_SUPPORT/CONFIG_USB_SS_SUPPORT)
+
+#endif
 	}
 	else
 	{
-		memcpy(&ctx->ep_config[index]->ep_desc[0], &ctx->usb_config->ep_desc[index],sizeof(struct usb_endpoint_descriptor_no_audio));
-		memcpy(&ctx->ep_config[index]->ep_desc[1], &ctx->usb_config->ep_desc[index],sizeof(struct usb_endpoint_descriptor_no_audio));
+#if defined(CONFIG_USB_SS_SUPPORT)
+		descriptor_ptr = (void *)&ctx->usb_config->ep_desc_ss;
+		descriptor_size = sizeof(ep_cfg_descriptor);
+#elif defined(CONFIG_USB_HS_SUPPORT)
+		descriptor_ptr = (void *)&ctx->usb_config->ep_desc_hs;
+		descriptor_size = sizeof(struct usb_endpoint_descriptor_no_audio);
+#elif defined(CONFIG_USB_FS_SUPPORT)
+		descriptor_ptr = (void *)&ctx->usb_config->ep_desc_fs;
+		descriptor_size = sizeof(struct usb_endpoint_descriptor_no_audio);
+#else
+
+#error Configuration Error ! At least one USB mode support must be enabled ! (CONFIG_USB_FS_SUPPORT/CONFIG_USB_HS_SUPPORT/CONFIG_USB_SS_SUPPORT)
+
+#endif
 	}
+
+#if defined(CONFIG_USB_SS_SUPPORT)
+	switch(index)
+	{
+		case EP_DESCRIPTOR_IN:
+			memcpy(&ctx->ep_config[index]->ep_desc[0], &((SSEndPointsDesc*)descriptor_ptr)->ep_desc_in,descriptor_size);
+			memcpy(&ctx->ep_config[index]->ep_desc[1], &((SSEndPointsDesc*)descriptor_ptr)->ep_desc_in,descriptor_size);
+		break;
+		case EP_DESCRIPTOR_OUT:
+			memcpy(&ctx->ep_config[index]->ep_desc[0], &((SSEndPointsDesc*)descriptor_ptr)->ep_desc_out,descriptor_size);
+			memcpy(&ctx->ep_config[index]->ep_desc[1], &((SSEndPointsDesc*)descriptor_ptr)->ep_desc_out,descriptor_size);
+		break;
+		case EP_DESCRIPTOR_INT_IN:
+			memcpy(&ctx->ep_config[index]->ep_desc[0], &((SSEndPointsDesc*)descriptor_ptr)->ep_desc_int_in,descriptor_size);
+			memcpy(&ctx->ep_config[index]->ep_desc[1], &((SSEndPointsDesc*)descriptor_ptr)->ep_desc_int_in,descriptor_size);
+		break;
+	}
+#else
+	switch(index)
+	{
+		case EP_DESCRIPTOR_IN:
+			memcpy(&ctx->ep_config[index]->ep_desc[0], &((EndPointsDesc*)descriptor_ptr)->ep_desc_in,descriptor_size);
+			memcpy(&ctx->ep_config[index]->ep_desc[1], &((EndPointsDesc*)descriptor_ptr)->ep_desc_in,descriptor_size);
+		break;
+		case EP_DESCRIPTOR_OUT:
+			memcpy(&ctx->ep_config[index]->ep_desc[0], &((EndPointsDesc*)descriptor_ptr)->ep_desc_out,descriptor_size);
+			memcpy(&ctx->ep_config[index]->ep_desc[1], &((EndPointsDesc*)descriptor_ptr)->ep_desc_out,descriptor_size);
+		break;
+		case EP_DESCRIPTOR_INT_IN:
+			memcpy(&ctx->ep_config[index]->ep_desc[0], &((EndPointsDesc*)descriptor_ptr)->ep_desc_int_in,descriptor_size);
+			memcpy(&ctx->ep_config[index]->ep_desc[1], &((EndPointsDesc*)descriptor_ptr)->ep_desc_int_in,descriptor_size);
+		break;
+	}
+#endif
 
 	PRINT_DEBUG("init_ep (%d):",index);
 	PRINT_DEBUG_BUF(ctx->ep_config[index], sizeof(ep_cfg));
@@ -253,18 +361,22 @@ int init_ep(usb_gadget * ctx,int index,int ffs_mode)
 	return fd;
 
 init_ep_error:
-	return 0;
+
+	if(fd >= 0)
+		close(fd);
+
+	return -1;
 }
 
 int init_eps(usb_gadget * ctx, int ffs_mode)
 {
-	if( !init_ep(ctx, EP_DESCRIPTOR_IN, ffs_mode) )
+	if( init_ep(ctx, EP_DESCRIPTOR_IN, ffs_mode) < 0 )
 		goto init_eps_error;
 
-	if( !init_ep(ctx, EP_DESCRIPTOR_OUT, ffs_mode) )
+	if( init_ep(ctx, EP_DESCRIPTOR_OUT, ffs_mode) < 0 )
 		goto init_eps_error;
 
-	if( !init_ep(ctx, EP_DESCRIPTOR_INT_IN, ffs_mode) )
+	if( init_ep(ctx, EP_DESCRIPTOR_INT_IN, ffs_mode) < 0 )
 		goto init_eps_error;
 
 	return 0;
@@ -275,101 +387,185 @@ init_eps_error:
 
 static void handle_setup_request(usb_gadget * ctx, struct usb_ctrlrequest* setup)
 {
-	int status;
+	int status,cnt;
 	uint8_t buffer[512];
+	mtp_device_status dstatus;
 
 	PRINT_DEBUG("Setup request 0x%.2X", setup->bRequest);
 
 	switch (setup->bRequest)
 	{
-	case USB_REQ_GET_DESCRIPTOR:
-		if (setup->bRequestType != USB_DIR_IN)
-			goto stall;
+		case USB_REQ_GET_DESCRIPTOR:
+			if (setup->bRequestType != USB_DIR_IN)
+				goto stall;
 
-		switch (setup->wValue >> 8)
-		{
-			case USB_DT_STRING:
-				PRINT_DEBUG("Get string id #%d (max length %d)", setup->wValue & 0xff,
-					setup->wLength);
-				status = usb_gadget_get_string (&strings, setup->wValue & 0xff, buffer);
-				// Error
-				if (status < 0)
+			switch (setup->wValue >> 8)
+			{
+				case USB_DT_STRING:
+					PRINT_DEBUG("Get string id #%d (max length %d)", setup->wValue & 0xff,
+						setup->wLength);
+					status = usb_gadget_get_string (&strings, setup->wValue & 0xff, buffer);
+					// Error
+					if (status < 0)
+					{
+						PRINT_ERROR("handle_setup_request : String id #%d (max length %d) not found !",setup->wValue & 0xff, setup->wLength);
+						break;
+					}
+					else
+					{
+						PRINT_DEBUG("Found %d bytes", status);
+						PRINT_DEBUG_BUF(buffer, status);
+					}
+
+					if ( write (ctx->usb_device, buffer, status) < 0 )
+					{
+						PRINT_ERROR("handle_setup_request - USB_REQ_GET_DESCRIPTOR : usb device write error !");
+						break;
+					}
+
+					return;
+				break;
+				default:
+					PRINT_DEBUG("Cannot return descriptor %d", (setup->wValue >> 8));
+				break;
+			}
+		break;
+
+		case USB_REQ_SET_CONFIGURATION:
+			if (setup->bRequestType != USB_DIR_OUT)
+			{
+				PRINT_DEBUG("Bad dir");
+				goto stall;
+			}
+
+			switch (setup->wValue)
+			{
+				case CONFIG_VALUE:
+					PRINT_DEBUG("Set config value");
+
+					if (ctx->ep_handles[EP_DESCRIPTOR_IN] <= 0)
+					{
+						status = init_eps(ctx,0);
+					}
+					else
+						status = 0;
+
+					if (!status)
+					{
+						ctx->stop = 0;
+						if( ctx->thread_not_started )
+							ctx->thread_not_started = pthread_create(&ctx->thread, NULL, io_thread, ctx);
+					}
+					break;
+				case 0:
+					PRINT_DEBUG("Disable threads");
+					ctx->stop = 1;
+					break;
+
+				default:
+					PRINT_DEBUG("Unhandled configuration value %d", setup->wValue);
+					break;
+			}
+
+			// Just ACK
+			status = read (ctx->usb_device, &status, 0);
+			return;
+		break;
+
+		case USB_REQ_GET_INTERFACE:
+			PRINT_DEBUG("GET_INTERFACE");
+			buffer[0] = 0;
+
+			if ( write (ctx->usb_device, buffer, 1) < 0 )
+			{
+				PRINT_ERROR("handle_setup_request - USB_REQ_GET_INTERFACE : usb device write error !");
+				break;
+			}
+
+			return;
+		break;
+
+		case USB_REQ_SET_INTERFACE:
+			PRINT_DEBUG("SET_INTERFACE");
+			ioctl (ctx->ep_handles[EP_DESCRIPTOR_IN], GADGETFS_CLEAR_HALT);
+			ioctl (ctx->ep_handles[EP_DESCRIPTOR_OUT], GADGETFS_CLEAR_HALT);
+			ioctl (ctx->ep_handles[EP_DESCRIPTOR_INT_IN], GADGETFS_CLEAR_HALT);
+			// ACK
+			status = read (ctx->usb_device, &status, 0);
+			return;
+		break;
+
+		case MTP_REQ_CANCEL:
+			PRINT_DEBUG("MTP_REQ_CANCEL !");
+
+			status = read (ctx->usb_device, &status, 0);
+
+			mtp_context->cancel_req = 1;
+
+			cnt = 0;
+			while( mtp_context->cancel_req )
+			{
+				// Wait the end of the current transfer
+				if( cnt > 250 )
 				{
-					PRINT_ERROR("handle_setup_request : String id #%d (max length %d) not found !",setup->wValue & 0xff, setup->wLength);
+					// Timeout... Unblock pending usb read/write.
+					PRINT_DEBUG("MTP_REQ_CANCEL : Forcing read/write exit...");
+					pthread_kill(ctx->thread, SIGUSR1);
+					usleep(500);
 					break;
 				}
 				else
-				{
-					PRINT_DEBUG("Found %d bytes", status);
-					PRINT_DEBUG_BUF(buffer, status);
-				}
+					usleep(1000);
 
-				if ( write (ctx->usb_device, buffer, status) < 0 )
+				cnt++;
+			}
+
+			while( mtp_context->cancel_req )
+			{
+				// Still Waiting the end of the current transfer...
+				if( cnt > 500 )
 				{
-					PRINT_ERROR("handle_setup_request - USB_REQ_GET_DESCRIPTOR : usb device write error !");
+					// Still blocked... Killing the link
+					PRINT_DEBUG("MTP_REQ_CANCEL : Stalled ... Killing the link...");
+					usleep(500);
+
+					ctx->stop = 1;
 					break;
 				}
+				else
+					usleep(1000);
 
-				return;
-		default:
-			PRINT_DEBUG("Cannot return descriptor %d", (setup->wValue >> 8));
-		}
+				cnt++;
+			}
+
+			PRINT_DEBUG("MTP_REQ_CANCEL done !");
+
+			return;
 		break;
-	case USB_REQ_SET_CONFIGURATION:
-		if (setup->bRequestType != USB_DIR_OUT)
-		{
-			PRINT_DEBUG("Bad dir");
-			goto stall;
-		}
-		switch (setup->wValue) {
-		case CONFIG_VALUE:
-			PRINT_DEBUG("Set config value");
 
-			if (ctx->ep_handles[EP_DESCRIPTOR_IN] <= 0)
+		case MTP_REQ_RESET:
+			PRINT_DEBUG("MTP_REQ_RESET !");
+
+			// Just ACK
+			status = read (ctx->usb_device, &status, 0);
+
+			return;
+		break;
+
+		case MTP_REQ_GET_DEVICE_STATUS:
+			PRINT_DEBUG("MTP_REQ_GET_DEVICE_STATUS !");
+
+			dstatus.wLength = sizeof(mtp_device_status);
+			dstatus.wCode = MTP_RESPONSE_OK;
+
+			if ( write (ctx->usb_device, (void*)&dstatus, sizeof(mtp_device_status) ) < 0 )
 			{
-				status = init_eps(ctx,0);
+				PRINT_ERROR("MTP_REQ_GET_DEVICE_STATUS : usb device write error !");
+				break;
 			}
-			else
-				status = 0;
 
-			if (!status)
-			{
-				ctx->stop = 0;
-				if( ctx->thread_not_started )
-					ctx->thread_not_started = pthread_create(&ctx->thread, NULL, io_thread, ctx);
-			}
-			break;
-		case 0:
-			PRINT_DEBUG("Disable threads");
-			ctx->stop = 1;
-			break;
-
-		default:
-			PRINT_DEBUG("Unhandled configuration value %d", setup->wValue);
-			break;
-		}
-		// Just ACK
-		status = read (ctx->usb_device, &status, 0);
-		return;
-	case USB_REQ_GET_INTERFACE:
-		PRINT_DEBUG("GET_INTERFACE");
-		buffer[0] = 0;
-
-		if ( write (ctx->usb_device, buffer, 1) < 0 )
-		{
-			PRINT_ERROR("handle_setup_request - USB_REQ_GET_INTERFACE : usb device write error !");
-			break;
-		}
-
-		return;
-	case USB_REQ_SET_INTERFACE:
-		PRINT_DEBUG("SET_INTERFACE");
-		ioctl (ctx->ep_handles[EP_DESCRIPTOR_IN], GADGETFS_CLEAR_HALT);
-		ioctl (ctx->ep_handles[EP_DESCRIPTOR_OUT], GADGETFS_CLEAR_HALT);
-		ioctl (ctx->ep_handles[EP_DESCRIPTOR_INT_IN], GADGETFS_CLEAR_HALT);
-		// ACK
-		status = read (ctx->usb_device, &status, 0);
-		return;
+			return;
+		break;
 	}
 
 stall:
@@ -395,7 +591,7 @@ stall:
 int handle_ep0(usb_gadget * ctx)
 {
 	struct timeval timeout;
-	int ret, nevents, i;
+	int ret, nevents, i, cnt;
 	fd_set read_set;
 	struct usb_gadgetfs_event events[5];
 
@@ -414,7 +610,7 @@ int handle_ep0(usb_gadget * ctx)
 		}
 		else
 		{
-			PRINT_DEBUG("Select without timeout");
+			PRINT_DEBUG("handle_ep0 : Select without timeout");
 			ret = select(ctx->usb_device+1, &read_set, NULL, NULL, NULL);
 		}
 
@@ -430,42 +626,77 @@ int handle_ep0(usb_gadget * ctx)
 
 		if (ret < 0)
 		{
-			PRINT_ERROR("handle_ep0 : Read error %d (%m)", ret);
+			PRINT_ERROR("handle_ep0 : Read error %d (%m)", errno);
 			goto end;
 		}
 
 		nevents = ret / sizeof(events[0]);
 
-		PRINT_DEBUG("%d event(s)", nevents);
+		PRINT_DEBUG("handle_ep0 : %d event(s)", nevents);
 
 		for (i=0; i<nevents; i++)
 		{
 			switch (events[i].type)
 			{
-			case GADGETFS_CONNECT:
-				PRINT_DEBUG("EP0 CONNECT");
+				case GADGETFS_CONNECT:
+					PRINT_DEBUG("handle_ep0 : EP0 CONNECT event");
 				break;
-			case GADGETFS_DISCONNECT:
-				PRINT_DEBUG("EP0 DISCONNECT");
-				// Set timeout for a reconnection during the enumeration...
-				timeout.tv_sec = 1;
-				timeout.tv_usec = 0;
 
-				ctx->stop = 1;
-				if( !ctx->thread_not_started )
-				{
-					pthread_cancel(ctx->thread);
-					pthread_join(ctx->thread, NULL);
-					ctx->thread_not_started = 1;
-				}
+				case GADGETFS_DISCONNECT:
+					PRINT_DEBUG("handle_ep0 : EP0 DISCONNECT event");
 
+					// Set timeout for a reconnection during the enumeration...
+					timeout.tv_sec = 1;
+					timeout.tv_usec = 0;
+
+					ctx->stop = 1;
+					if( !ctx->thread_not_started )
+					{
+						pthread_cancel(ctx->thread);
+						pthread_join(ctx->thread, NULL);
+						ctx->thread_not_started = 1;
+					}
 				break;
-			case GADGETFS_SETUP:
-				PRINT_DEBUG("EP0 SETUP");
-				handle_setup_request(ctx, &events[i].u.setup);
+
+				case GADGETFS_SETUP:
+					PRINT_DEBUG("handle_ep0 : EP0 SETUP event");
+					handle_setup_request(ctx, &events[i].u.setup);
 				break;
-			case GADGETFS_NOP:
-			case GADGETFS_SUSPEND:
+
+				case GADGETFS_NOP:
+					PRINT_DEBUG("handle_ep0 : EP0 NOP event");
+				break;
+
+				case GADGETFS_SUSPEND:
+					PRINT_DEBUG("handle_ep0 : EP0 SUSPEND event");
+
+					if(mtp_context->transferring_file_data)
+					{
+						// Cancel the ongoing file transfer
+						mtp_context->cancel_req = 1;
+
+						cnt = 0;
+						while( mtp_context->cancel_req )
+						{
+							// Wait the end of the current transfer
+							if( cnt > 250 )
+							{
+								// Timeout... Unblock pending usb read/write.
+								PRINT_DEBUG("GADGETFS_SUSPEND : Forcing usb file transfer read/write exit...");
+								pthread_kill(ctx->thread, SIGUSR1);
+								usleep(500);
+								break;
+							}
+							else
+								usleep(1000);
+
+							cnt++;
+						}
+					}
+					break;
+
+				default:
+					PRINT_DEBUG("handle_ep0 : EP0 unknown event : %d",events[i].type);
 				break;
 			}
 		}
@@ -643,6 +874,35 @@ usb_gadget * init_usb_mtp_gadget(mtp_ctx * ctx)
 	int ret,i;
 	ffs_strings ffs_str;
 
+	usbctx = NULL;
+
+	if(ctx->wrbuffer)
+		free(ctx->wrbuffer);
+
+	ctx->wrbuffer = malloc( ctx->usb_wr_buffer_max_size );
+	if(!ctx->wrbuffer)
+		goto init_error;
+
+	memset(ctx->wrbuffer,0,ctx->usb_wr_buffer_max_size);
+
+	if(ctx->rdbuffer)
+		free(ctx->rdbuffer);
+
+	ctx->rdbuffer = malloc( ctx->usb_rd_buffer_max_size );
+	if(!ctx->rdbuffer)
+		goto init_error;
+
+	memset(ctx->rdbuffer,0,ctx->usb_rd_buffer_max_size);
+
+	if(ctx->rdbuffer2)
+		free(ctx->rdbuffer2);
+
+	ctx->rdbuffer2 = malloc( ctx->usb_rd_buffer_max_size );
+	if(!ctx->rdbuffer2)
+		goto init_error;
+
+	memset(ctx->rdbuffer2,0,ctx->usb_rd_buffer_max_size);
+
 	usbctx = malloc(sizeof(usb_gadget));
 	if(usbctx)
 	{
@@ -685,7 +945,7 @@ usb_gadget * init_usb_mtp_gadget(mtp_ctx * ctx)
 
 		usbctx->usb_device = open(ctx->usb_cfg.usb_device_path, O_RDWR|O_SYNC);
 
-		if (usbctx->usb_device <= 0)
+		if (usbctx->usb_device < 0)
 		{
 			PRINT_ERROR("init_usb_mtp_gadget : Unable to open %s (%m)", ctx->usb_cfg.usb_device_path);
 			goto init_error;
@@ -703,21 +963,51 @@ usb_gadget * init_usb_mtp_gadget(mtp_ctx * ctx)
 
 			memset(usbctx->usb_ffs_config,0,sizeof(usb_ffs_cfg));
 
+#ifdef OLD_FUNCTIONFS_DESCRIPTORS // Kernel < v3.15
+			usbctx->usb_ffs_config->magic = htole32(FUNCTIONFS_DESCRIPTORS_MAGIC);
+#else
 			usbctx->usb_ffs_config->magic = htole32(FUNCTIONFS_DESCRIPTORS_MAGIC_V2);
-			usbctx->usb_ffs_config->flags = htole32(FUNCTIONFS_HAS_FS_DESC | FUNCTIONFS_HAS_HS_DESC);
-			usbctx->usb_ffs_config->fs_count = htole32(4),
-			usbctx->usb_ffs_config->hs_count = htole32(4),
+			usbctx->usb_ffs_config->flags = htole32(0);
+
+#ifdef CONFIG_USB_FS_SUPPORT
+			usbctx->usb_ffs_config->flags |= htole32(FUNCTIONFS_HAS_FS_DESC);
+#endif
+
+#ifdef CONFIG_USB_HS_SUPPORT
+			usbctx->usb_ffs_config->flags |= htole32(FUNCTIONFS_HAS_HS_DESC);
+#endif
+
+#ifdef CONFIG_USB_SS_SUPPORT
+			usbctx->usb_ffs_config->flags |= htole32(FUNCTIONFS_HAS_SS_DESC);
+#endif
+
+#endif
 			usbctx->usb_ffs_config->length = htole32(sizeof(usb_ffs_cfg));
 
-			fill_if_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->if_desc);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc[EP_DESCRIPTOR_IN],EP_DESCRIPTOR_IN+1,1,0,0);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc[EP_DESCRIPTOR_OUT],EP_DESCRIPTOR_OUT+1,1,1,0);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc[EP_DESCRIPTOR_INT_IN],EP_DESCRIPTOR_INT_IN+1,0,0,0);
+#ifdef CONFIG_USB_FS_SUPPORT
+			usbctx->usb_ffs_config->fs_count = htole32(1 + 3);
 
-			fill_if_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->if_desc_hs);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_hs[EP_DESCRIPTOR_IN],EP_DESCRIPTOR_IN+1,1,0,1);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_hs[EP_DESCRIPTOR_OUT],EP_DESCRIPTOR_OUT+1,1,1,1);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_hs[EP_DESCRIPTOR_INT_IN],EP_DESCRIPTOR_INT_IN+1,0,0,1);
+			fill_if_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_fs.if_desc);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_fs.ep_desc_in,1, EP_BULK_MODE | EP_IN_DIR);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_fs.ep_desc_out,2, EP_BULK_MODE | EP_OUT_DIR);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_fs.ep_desc_int_in,3, EP_INT_MODE | EP_IN_DIR);
+#endif
+
+#ifdef CONFIG_USB_HS_SUPPORT
+			usbctx->usb_ffs_config->hs_count = htole32(1 + 3);
+			fill_if_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_hs.if_desc);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_hs.ep_desc_in,1, EP_BULK_MODE | EP_IN_DIR | EP_HS_MODE);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_hs.ep_desc_out,2, EP_BULK_MODE | EP_OUT_DIR | EP_HS_MODE);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_hs.ep_desc_int_in,3, EP_INT_MODE | EP_IN_DIR | EP_HS_MODE);
+#endif
+
+#ifdef CONFIG_USB_SS_SUPPORT
+			usbctx->usb_ffs_config->ss_count = htole32(1 + (3*2));
+			fill_if_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_ss.if_desc);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_ss.ep_desc_in,1, EP_BULK_MODE | EP_IN_DIR | EP_SS_MODE);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_ss.ep_desc_out,2, EP_BULK_MODE | EP_OUT_DIR | EP_SS_MODE);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_ffs_config->ep_desc_ss.ep_desc_int_in,3, EP_INT_MODE | EP_IN_DIR | EP_SS_MODE);
+#endif
 
 			PRINT_DEBUG("init_usb_mtp_gadget :");
 			PRINT_DEBUG_BUF(usbctx->usb_ffs_config, sizeof(usb_ffs_cfg));
@@ -758,17 +1048,30 @@ usb_gadget * init_usb_mtp_gadget(mtp_ctx * ctx)
 			memset(usbctx->usb_config,0,sizeof(usb_cfg));
 
 			usbctx->usb_config->head = 0x00000000;
-			fill_config_descriptor(ctx, usbctx, &usbctx->usb_config->cfg, cfg_size, 0);
-			fill_if_descriptor(ctx, usbctx, &usbctx->usb_config->if_desc);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc[EP_DESCRIPTOR_IN],EP_DESCRIPTOR_IN+1,1,0,0);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc[EP_DESCRIPTOR_OUT],EP_DESCRIPTOR_OUT+1,1,1,0);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc[EP_DESCRIPTOR_INT_IN],EP_DESCRIPTOR_INT_IN+1,0,0,0);
 
+#ifdef CONFIG_USB_FS_SUPPORT
+			fill_config_descriptor(ctx, usbctx, &usbctx->usb_config->cfg_fs, cfg_size, 0);
+			fill_if_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_fs.if_desc);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_fs.ep_desc_in,1, EP_BULK_MODE | EP_IN_DIR);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_fs.ep_desc_out,2, EP_BULK_MODE | EP_OUT_DIR);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_fs.ep_desc_int_in,3, EP_INT_MODE | EP_IN_DIR);
+#endif
+
+#ifdef CONFIG_USB_HS_SUPPORT
 			fill_config_descriptor(ctx, usbctx, &usbctx->usb_config->cfg_hs, cfg_size, 1);
-			fill_if_descriptor(ctx, usbctx, &usbctx->usb_config->if_desc_hs);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_hs[EP_DESCRIPTOR_IN],EP_DESCRIPTOR_IN+1,1,0,1);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_hs[EP_DESCRIPTOR_OUT],EP_DESCRIPTOR_OUT+1,1,1,1);
-			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_hs[EP_DESCRIPTOR_INT_IN],EP_DESCRIPTOR_INT_IN+1,0,0,1);
+			fill_if_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_hs.if_desc);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_hs.ep_desc_in,1, EP_BULK_MODE | EP_IN_DIR | EP_HS_MODE);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_hs.ep_desc_out,2, EP_BULK_MODE | EP_OUT_DIR | EP_HS_MODE);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_hs.ep_desc_int_in,3, EP_INT_MODE | EP_IN_DIR | EP_HS_MODE);
+#endif
+
+#ifdef CONFIG_USB_SS_SUPPORT
+			fill_config_descriptor(ctx, usbctx, &usbctx->usb_config->cfg_ss, cfg_size, 1);
+			fill_if_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_ss.if_desc);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_ss.ep_desc_in,1, EP_BULK_MODE | EP_IN_DIR | EP_SS_MODE);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_ss.ep_desc_out,2, EP_BULK_MODE | EP_OUT_DIR | EP_SS_MODE);
+			fill_ep_descriptor(ctx, usbctx, &usbctx->usb_config->ep_desc_ss.ep_desc_int_in,3, EP_INT_MODE | EP_IN_DIR | EP_SS_MODE);
+#endif
 
 			fill_dev_descriptor(ctx, usbctx,&usbctx->usb_config->dev_desc);
 
@@ -794,7 +1097,7 @@ init_error:
 
 	deinit_usb_mtp_gadget(usbctx);
 
-	return 0;
+	return NULL;
 }
 
 void deinit_usb_mtp_gadget(usb_gadget * usbctx)
@@ -865,6 +1168,24 @@ void deinit_usb_mtp_gadget(usb_gadget * usbctx)
 		free( usbctx );
 	}
 
-	PRINT_DEBUG("leaving deinit_usb_mtp_gadget");
+	if(mtp_context->wrbuffer)
+	{
+		free(mtp_context->wrbuffer);
+		mtp_context->wrbuffer = NULL;
+	}
 
+	if(mtp_context->rdbuffer)
+	{
+		free(mtp_context->rdbuffer);
+		mtp_context->rdbuffer = NULL;
+	}
+
+	if(mtp_context->rdbuffer2)
+	{
+		free(mtp_context->rdbuffer2);
+		mtp_context->rdbuffer2 = NULL;
+	}
+
+	PRINT_DEBUG("leaving deinit_usb_mtp_gadget");
 }
+

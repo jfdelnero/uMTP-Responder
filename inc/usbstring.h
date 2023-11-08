@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2019 Viveris Technologies
+ * Copyright (c) 2018 - 2021 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -37,5 +37,6 @@ struct usb_gadget_strings {
 };
 
 int usb_gadget_get_string (struct usb_gadget_strings *table, int id, uint8_t *buf);
-
+int unicode2charstring(char * str, uint16_t * unicodestr, int maxstrsize);
+int char2unicodestring(char * unicodestr, int index, int maxsize, char * str, int unicodestrsize);
 #endif

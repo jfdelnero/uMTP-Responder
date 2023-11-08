@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2019 Viveris Technologies
+ * Copyright (c) 2018 - 2021 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -23,37 +23,24 @@
  * @author Jean-François DEL NERO <Jean-Francois.DELNERO@viveris.fr>
  */
 
-#include <stdio.h>
-#include <stdint.h>
+#include "buildconf.h"
+
+#include <inttypes.h>
+#include <pthread.h>
 #include <string.h>
-#include <stdbool.h>
-#include <stdlib.h>
-
-#include <errno.h>
-
-#include <poll.h>
 #include <sys/inotify.h>
-
-#include <sys/stat.h>
 #include <unistd.h>
-#include <sys/types.h>
-
 #include <signal.h>
 
-#include "logs_out.h"
-
-#include "mtp_helpers.h"
-
-#include "fs_handles_db.h"
-
 #include "mtp.h"
+#include "mtp_helpers.h"
+#include "mtp_constant.h"
 #include "mtp_datasets.h"
 
 #include "usb_gadget_fct.h"
-
+#include "fs_handles_db.h"
 #include "inotify.h"
-
-#include "mtp_constant.h"
+#include "logs_out.h"
 
 #define INOTIFY_RD_BUF_SIZE ( 32*1024 )
 
@@ -84,7 +71,9 @@ static int get_file_info(mtp_ctx * ctx, const struct inotify_event *event, fs_en
 				{
 					fileinfo->isdirectory = 0;
 					fileinfo->size = 0;
-					strncpy( fileinfo->filename, event->name, 256 );
+
+					strncpy( fileinfo->filename, event->name, FS_HANDLE_MAX_FILENAME_SIZE );
+					fileinfo->filename[FS_HANDLE_MAX_FILENAME_SIZE] = '\0';
 				}
 
 				free( tmp_path );
@@ -109,6 +98,7 @@ void* inotify_thread(void* arg)
 	int i,length;
 	fs_entry * entry;
 	fs_entry * deleted_entry;
+	fs_entry * modified_entry;
 	fs_entry * new_entry;
 	fs_entry * old_entry;
 	filefoundinfo fileinfo;
@@ -147,43 +137,96 @@ void* inotify_thread(void* arg)
 				// Sanity check to prevent possible buffer overrun/overflow.
 				if ( event->len && (i + (( sizeof (struct inotify_event) ) + event->len) < sizeof(inotify_buffer)) )
 				{
-					if ( event->mask & IN_CREATE )
+					if ( ( event->mask & IN_CREATE ) || ( event->mask & IN_MOVED_TO ) )
 					{
-						pthread_mutex_lock( &ctx->inotify_mutex );
-						entry = get_entry_by_wd( ctx->fs_db, event->wd );
-						if ( get_file_info( ctx, event, entry, &fileinfo, 0 ) )
+						entry = NULL;
+						do
 						{
-							old_entry = search_entry(ctx->fs_db, &fileinfo, entry->handle, entry->storage_id);
-							if( !old_entry )
+							pthread_mutex_lock( &ctx->inotify_mutex );
+							entry = get_entry_by_wd( ctx->fs_db, event->wd, entry );
+							if ( get_file_info( ctx, event, entry, &fileinfo, 0 ) )
 							{
-								// If the entry is not in the db, add it and trigger an MTP_EVENT_OBJECT_ADDED event
-								new_entry = add_entry( ctx->fs_db, &fileinfo, entry->handle, entry->storage_id );
+								old_entry = search_entry(ctx->fs_db, &fileinfo, entry->handle, entry->storage_id);
+								if( !old_entry )
+								{
+									// If the entry is not in the db, add it and trigger an MTP_EVENT_OBJECT_ADDED event
+									new_entry = add_entry( ctx->fs_db, &fileinfo, entry->handle, entry->storage_id );
+									if( new_entry )
+									{
+										// Send an "ObjectAdded" (0x4002) MTP event message with the entry handle.
+										handle[0] = new_entry->handle;
+										mtp_push_event( ctx, MTP_EVENT_OBJECT_ADDED, 1, (uint32_t *)&handle );
 
-								// Send an "ObjectAdded" (0x4002) MTP event message with the entry handle.
-								handle[0] = new_entry->handle;
-
-								mtp_push_event( ctx, MTP_EVENT_OBJECT_ADDED, 1, (uint32_t *)&handle );
-
-								PRINT_DEBUG( "inotify_thread (IN_CREATE): Entry %s created (Handle 0x%.8X)", event->name, new_entry->handle );
+										PRINT_DEBUG( "inotify_thread (IN_CREATE): Entry %s created (Handle 0x%.8X)", event->name, new_entry->handle );
+									}
+									else
+									{
+										PRINT_DEBUG( "inotify_thread (IN_CREATE): Entry %s creation failure !", event->name );
+									}
+								}
+								else
+								{
+									PRINT_DEBUG( "inotify_thread (IN_CREATE): Entry %s already in the db ! (Handle 0x%.8X)", event->name, old_entry->handle );
+								}
 							}
 							else
 							{
-								PRINT_DEBUG( "inotify_thread (IN_CREATE): Entry %s already in the db ! (Handle 0x%.8X)", event->name, old_entry->handle );
+								PRINT_DEBUG( "inotify_thread (IN_CREATE): Watch point descriptor not found in the db ! (Descriptor 0x%.8X)", event->wd );
 							}
-						}
-						else
-						{
-							PRINT_DEBUG( "inotify_thread (IN_CREATE): Watch point descriptor not found in the db ! (Descriptor 0x%.8X)", event->wd );
-						}
-						pthread_mutex_unlock( &ctx->inotify_mutex );
+
+							if(entry)
+							{
+								entry = entry->next;
+							}
+
+							pthread_mutex_unlock( &ctx->inotify_mutex );
+						}while(entry);
 					}
-					else
+
+					if ( event->mask & IN_MODIFY )
 					{
-						if ( event->mask & IN_DELETE )
+						entry = NULL;
+
+						do
 						{
 							pthread_mutex_lock( &ctx->inotify_mutex );
 
-							entry = get_entry_by_wd( ctx->fs_db, event->wd );
+							entry = get_entry_by_wd( ctx->fs_db, event->wd, entry );
+							if ( get_file_info( ctx, event, entry, &fileinfo, 1 ) )
+							{
+								modified_entry = search_entry(ctx->fs_db, &fileinfo, entry->handle, entry->storage_id);
+								if( modified_entry )
+								{
+									// Send an "ObjectInfoChanged" (0x4007) MTP event message with the entry handle.
+									handle[0] = modified_entry->handle;
+									mtp_push_event( ctx, MTP_EVENT_OBJECT_INFO_CHANGED, 1, (uint32_t *)&handle );
+
+									PRINT_DEBUG( "inotify_thread (IN_MODIFY): Entry %s modified (Handle 0x%.8X)", event->name, modified_entry->handle);
+								}
+							}
+							else
+							{
+								PRINT_DEBUG( "inotify_thread (IN_MODIFY): Watch point descriptor not found in the db ! (Descriptor 0x%.8X)", event->wd );
+							}
+
+							if(entry)
+							{
+								entry = entry->next;
+							}
+
+							pthread_mutex_unlock( &ctx->inotify_mutex );
+						}while(entry);
+					}
+
+					if ( ( event->mask & IN_DELETE ) || ( event->mask & IN_MOVED_FROM ) )
+					{
+						entry = NULL;
+
+						do
+						{
+							pthread_mutex_lock( &ctx->inotify_mutex );
+
+							entry = get_entry_by_wd( ctx->fs_db, event->wd, entry );
 							if ( get_file_info( ctx, event, entry, &fileinfo, 1 ) )
 							{
 								deleted_entry = search_entry(ctx->fs_db, &fileinfo, entry->handle, entry->storage_id);
@@ -208,8 +251,13 @@ void* inotify_thread(void* arg)
 								PRINT_DEBUG( "inotify_thread (IN_DELETE): Watch point descriptor not found in the db ! (Descriptor 0x%.8X)", event->wd );
 							}
 
+							if(entry)
+							{
+								entry = entry->next;
+							}
+
 							pthread_mutex_unlock( &ctx->inotify_mutex );
-						}
+						}while(entry);
 					}
 				}
 
@@ -268,7 +316,7 @@ int inotify_handler_addwatch( mtp_ctx * ctx, char * path )
 	{
 		if( !ctx->no_inotify )
 		{
-			return inotify_add_watch( ctx->inotify_fd, path, IN_CREATE | IN_DELETE );
+			return inotify_add_watch( ctx->inotify_fd, path, IN_CREATE | IN_DELETE | IN_MODIFY | IN_MOVED_FROM | IN_MOVED_TO );
 		}
 	}
 

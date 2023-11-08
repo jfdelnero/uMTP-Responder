@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2019 Viveris Technologies
+ * Copyright (c) 2018 - 2021 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -23,20 +23,29 @@
  * @author Jean-François DEL NERO <Jean-Francois.DELNERO@viveris.fr>
  */
 
-#include <stdint.h>
+#include "buildconf.h"
 
-#include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <pthread.h>
+#include <string.h>
 
-#include <errno.h>
+#ifdef SYSTEMD_NOTIFY
+#include <systemd/sd-login.h>
+#include <systemd/sd-daemon.h>
+#endif
 
 #include "mtp.h"
-
 
 #include "usb_gadget.h"
 #include "usb_gadget_fct.h"
 
 #include "logs_out.h"
+
+#include "msgqueue.h"
+
+#include "default_cfg.h"
 
 mtp_ctx * mtp_context;
 
@@ -59,27 +68,19 @@ void* io_thread(void* arg)
 	return NULL;
 }
 
-int main(int argc, char *argv[])
+static int main_thread(const char *conffile)
 {
 	usb_gadget * usb_ctx;
 	int retcode = 0;
 	int loop_continue = 0;
 
-	mtp_context = 0;
-
-	PRINT_MSG("uMTP Responder");
-	PRINT_MSG("Version: %s compiled the %s@%s", APP_VERSION,
-		  __DATE__, __TIME__);
-
-	PRINT_MSG("(c) 2018 - 2019 Viveris Technologies");
-
 	mtp_context = mtp_init_responder();
 	if(!mtp_context)
 	{
-		exit(-1);
+		return -1;
 	}
 
-	mtp_load_config_file(mtp_context);
+	mtp_load_config_file(mtp_context, conffile);
 
 	loop_continue = mtp_context->usb_cfg.loop_on_disconnect;
 
@@ -89,6 +90,12 @@ int main(int argc, char *argv[])
 		if(usb_ctx)
 		{
 			mtp_set_usb_handle(mtp_context, usb_ctx, mtp_context->usb_cfg.usb_max_packet_size);
+
+#ifdef SYSTEMD_NOTIFY
+			/* Tell systemd that we are ready */
+			sd_notify(0, "READY=1");
+#endif
+
 			if( mtp_context->usb_cfg.usb_functionfs_mode )
 			{
 				PRINT_DEBUG("uMTP Responder : FunctionFS Mode - entering handle_ffs_ep0");
@@ -119,5 +126,42 @@ int main(int argc, char *argv[])
 
 	mtp_deinit_responder(mtp_context);
 
-	exit(retcode);
+	return retcode;
+}
+
+#define PARAMETER_IPCCMD "-cmd:"
+#define PARAMETER_CONF "-conf"
+
+int main(int argc, char *argv[])
+{
+	const char *conffile = UMTPR_CONF_FILE;
+	int retcode;
+
+	PRINT_MSG("uMTP Responder");
+	PRINT_MSG("Version: %s compiled the %s@%s", APP_VERSION,
+		  __DATE__, __TIME__);
+
+	PRINT_MSG("(c) 2018 - 2021 Viveris Technologies");
+
+	if(argc>1)
+	{
+		if(argv[1])
+		{
+			if(!strncmp(argv[1],PARAMETER_IPCCMD,sizeof(PARAMETER_IPCCMD)-1))
+			{
+				PRINT_MSG("Sending command : %s",&argv[1][sizeof(PARAMETER_IPCCMD)-1]);
+				retcode = send_message_queue( &argv[1][sizeof(PARAMETER_IPCCMD)-1] );
+				exit(retcode);
+			}
+
+			if(!strcmp(argv[1],PARAMETER_CONF) && argc > 2)
+				conffile = argv[2];
+		}
+	}
+
+	retcode = main_thread(conffile);
+	if( retcode )
+		PRINT_ERROR("Error : Couldn't run the main thread... (%d)", retcode);
+
+	return -retcode;
 }

@@ -1,48 +1,41 @@
+CFLAGS += -I./inc -lpthread -Wall
 
-override CFLAGS += -I./inc -lpthread -Wall -O3
+sources := $(wildcard src/*.c)
+objects := $(sources:src/%.c=obj/%.o)
 
-all: output_dir umtprd
+ops_sources := $(wildcard src/mtp_operations/*.c)
+ops_objects := $(ops_sources:src/mtp_operations/%.c=obj/%.o)
 
-umtprd: obj/umtprd.o obj/mtp.o obj/mtp_datasets.o obj/mtp_helpers.o \
-		obj/mtp_support_def.o obj/mtp_constant_strings.o obj/fs_handles_db.o \
-		obj/usb_gadget.o obj/logs_out.o obj/usbstring.o obj/mtp_cfg.o obj/inotify.o
+ifeq ($(DEBUG), 1)
+	CFLAGS += -O0 -g -DDEBUG
+else
+	CFLAGS += -O3
+	LDFLAGS += -s
+endif
+
+ifeq ($(SYSTEMD), 1)
+	CFLAGS += -DSYSTEMD_NOTIFY
+	LDFLAGS += -lsystemd
+endif
+
+ifeq ($(USE_SYSLOG), 1)
+	CFLAGS += -DUSE_SYSLOG
+endif
+
+ifeq ($(OLD_FUNCTIONFS_DESCRIPTORS), 1)
+	CFLAGS += -DOLD_FUNCTIONFS_DESCRIPTORS
+endif
+
+all: umtprd
+
+umtprd: $(objects) $(ops_objects)
 	${CC} -o $@    $^ $(LDFLAGS) -lpthread
 
-obj/umtprd.o: src/umtprd.c
-	${CC} -o $@ $^ -c $(CFLAGS)
+$(objects): obj/%.o: src/%.c | output_dir
+	${CC} -o $@ $^ -c $(CPPFLAGS) $(CFLAGS)
 
-obj/mtp.o: src/mtp.c
-	${CC} -o $@ $^ -c $(CFLAGS)
-
-obj/mtp_datasets.o: src/mtp_datasets.c
-	${CC} -o $@ $^ -c $(CFLAGS)
-
-obj/mtp_helpers.o: src/mtp_helpers.c
-	${CC} -o $@ $^ -c $(CFLAGS)
-
-obj/mtp_support_def.o: src/mtp_support_def.c
-	${CC} -o $@ $^ -c $(CFLAGS)
-
-obj/mtp_constant_strings.o: src/mtp_constant_strings.c
-	${CC} -o $@ $^ -c $(CFLAGS)
-
-obj/mtp_cfg.o: src/mtp_cfg.c
-	${CC} -o $@ $^ -c $(CFLAGS)
-
-obj/fs_handles_db.o: src/fs_handles_db.c
-	${CC} -o $@ $^ -c $(CFLAGS)
-
-obj/usb_gadget.o: src/usb_gadget.c
-	${CC} -o $@ $^ -c $(CFLAGS)
-
-obj/logs_out.o: src/logs_out.c
-	${CC} -o $@ $^ -c $(CFLAGS)
-
-obj/usbstring.o: src/usbstring.c
-	${CC} -o $@ $^ -c $(CFLAGS)
-
-obj/inotify.o: src/inotify.c
-	${CC} -o $@ $^ -c $(CFLAGS)
+$(ops_objects): obj/%.o: src/mtp_operations/%.c | output_dir
+	${CC} -o $@ $^ -c $(CPPFLAGS) $(CFLAGS)
 
 output_dir:
 	@mkdir -p obj
@@ -50,3 +43,25 @@ output_dir:
 clean:
 	rm -Rf  *.o  .*.o  .*.o.* *.ko  .*.ko  *.mod.* .*.mod.* .*.cmd umtprd obj
 
+help:
+	@echo uMTP-Responder build help :
+	@echo
+	@echo Normal build :
+	@echo "make"
+	@echo
+	@echo Cross compiled build :
+	@echo "make CC=armv6j-hardfloat-linux-gnueabi-gcc"
+	@echo
+	@echo Syslog support enabled build :
+	@echo "make USE_SYSLOG=1"
+	@echo
+	@echo systemd notify support enabled build :
+	@echo "make SYSTEMD=1"
+	@echo
+	@echo build with old-style FunctionFS descriptors support for old 3.15 kernels :
+	@echo "make OLD_FUNCTIONFS_DESCRIPTORS=1"
+	@echo
+	@echo Debug build :
+	@echo "make DEBUG=1"
+	@echo
+	@echo You can combine most of these options.

@@ -3,7 +3,7 @@
 
 # uMTP-Responder
 
-## Ligthweight Media Transfer Protocol (MTP) responder daemon for GNU/Linux
+## Lightweight USB Media Transfer Protocol (MTP) responder daemon for GNU/Linux
 
 The uMTP-Responder allows files to be transferred to and from devices through the devices USB port.
 
@@ -21,6 +21,8 @@ The uMTP-Responder allows files to be transferred to and from devices through th
 
 - Dynamic handles allocation (No file-system pre-scan).
 
+- Unicode support.
+
 - (Optional) Syslog support.
 
 ## Current status
@@ -37,7 +39,17 @@ The uMTP-Responder allows files to be transferred to and from devices through th
 
 - Files & Folders deletion.
 
+- Files & Folders renaming.
+
+- Files / folders changes async events.
+
 - Up to 16 storage instances supported.
+
+- Storages mount / unmount.
+
+- Storages lock / unlock.
+
+- Global and Storages GID/UID override options.
 
 - GadgetFS and FunctionFS/libcomposite modes supported.
 
@@ -46,10 +58,10 @@ The uMTP-Responder allows files to be transferred to and from devices through th
 Any board with a USB device port should be compatible. The only requirement is to have the USB FunctionFS (CONFIG_USB_FUNCTIONFS) or GadgetFS (CONFIG_USB_GADGETFS) support enabled in your Linux kernel.
 You also need to enable the board-specific USB device port driver (eg. dwc2 for the RaspberryPi Zero).
 
-uMTP-Responder is currently tested with various 4.x.x Linux kernel versions.
+uMTP-Responder was tested on various Linux kernel versions (4.x.x / 5.x.x / 6.x.x ...) .
 This may work with earlier kernels (v3.x.x and some v2.6.x versions) but without any guarantee.
 
-### Boards successfully tested
+### Successfully tested boards
 
 - Atmel Sama5D2 Xplained.
 
@@ -63,9 +75,11 @@ This may work with earlier kernels (v3.x.x and some v2.6.x versions) but without
 
 - Samsung Artik710. (FunctionFS mode)
 
-### Client operating systems successfully tested
+- Ultra96-V2 (Zynq UltraScale+, FunctionFS mode, SuperSpeed USB)
 
-- Windows 7, Windows 10, Linux.
+### Successfully tested client operating systems
+
+- Windows 7, Windows 10, Windows 11, Linux, Android.
 
 ## How to build it ?
 
@@ -86,12 +100,30 @@ make CC=armv6j-hardfloat-linux-gnueabi-gcc
 On a cross-compile environment with both syslog support and debug output options enabled :
 
 ```c
-make CC=armv6j-hardfloat-linux-gnueabi-gcc CFLAGS="-DUSE_SYSLOG -DDEBUG"
+make CC=armv6j-hardfloat-linux-gnueabi-gcc USE_SYSLOG=1 DEBUG=1
 ```
 
 Note: syslog support and debug output options can be enabled separately.
 
 (replace "armv6j-hardfloat-linux-gnueabi-gcc" with your target gcc cross-compiler)
+
+If you want to use it on a Kernel version < 3.15 you need to compile uMTPrd with old-style FunctionFS descriptors support :
+
+```c
+make CC=armv6j-hardfloat-linux-gnueabi-gcc OLD_FUNCTIONFS_DESCRIPTORS=1
+```
+
+To enable the systemd notify event support when the endpoint setup is done :
+
+```c
+make CC=armv6j-hardfloat-linux-gnueabi-gcc SYSTEMD=1
+```
+
+To get the current flags/options available :
+
+```c
+make help
+```
 
 ## How to set it up ?
 
@@ -102,6 +134,54 @@ Check the file [umtprd.conf](conf/umtprd.conf) file for details on available opt
 ## How to launch it ?
 
 Once you have configured the correct settings in umtprd.conf, you can use umtprd_ffs.sh or umtprd_gfs.sh to launch it in FunctionFS/GadgetFS mode or use udev to launch the deamon when the usb device port is connected.
+
+## Runtime operations
+
+uMTP-Responder supports dynamic commands to add/mount/umount/remove storage and lock/unlock storage.
+
+Examples:
+
+Unlock all locked storage (set with the 'locked' option in the configuration file) :
+
+```c
+umtprd -cmd:unlock
+```
+
+Lock all lockable storage (set with the 'locked' option in the configuration file) :
+
+```c
+umtprd -cmd:lock
+```
+
+"addstorage"/"rmstorage" commands to dynamically add/remove storage :
+
+```c
+umtprd '-cmd:addstorage:/tmp Tmp rw'
+```
+
+```c
+umtprd '-cmd:rmstorage:Tmp'
+```
+
+Use double-quotes when arguments have spaces in them:
+
+```c
+umtprd '-cmd:addstorage:/path "My Path" rw,removable'
+```
+
+```c
+umtprd '-cmd:rmstorage:"My Path"'
+```
+
+"mount"/"unmount" commands to dynamically mount/unmount storage.
+
+```c
+umtprd '-cmd:mount:"Storage name"'
+```
+
+```c
+umtprd '-cmd:unmount:"Storage name"'
+```
 
 ## License
 

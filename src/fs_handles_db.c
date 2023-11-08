@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2019 Viveris Technologies
+ * Copyright (c) 2018 - 2021 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -23,25 +23,30 @@
  * @author Jean-François DEL NERO <Jean-Francois.DELNERO@viveris.fr>
  */
 
-#include <stdint.h>
-#include <stdio.h>
+#include "buildconf.h"
+
+#include <inttypes.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <sys/stat.h>
-#include <time.h>
-
 #include <dirent.h>
 
-#include "logs_out.h"
-#include "fs_handles_db.h"
 #include "mtp.h"
+#include "mtp_helpers.h"
+
+#include "fs_handles_db.h"
 #include "inotify.h"
+#include "logs_out.h"
 
 int fs_remove_tree( char *folder )
 {
 	struct dirent *d;
 	DIR * dir;
-	struct stat fileStat;
+	struct stat64 fileStat;
 	char * tmpstr;
 	int del_fail;
 
@@ -62,8 +67,8 @@ int fs_remove_tree( char *folder )
 					strcat(tmpstr,"/");
 					strcat(tmpstr,d->d_name);
 
-					memset(&fileStat,0,sizeof(struct stat));
-					if( !lstat (tmpstr, &fileStat) )
+					memset(&fileStat,0,sizeof(struct stat64));
+					if( !lstat64 (tmpstr, &fileStat) )
 					{
 						if ( S_ISDIR ( fileStat.st_mode ) )
 						{
@@ -104,11 +109,11 @@ int fs_remove_tree( char *folder )
 
 int fs_entry_stat(char *path, filefoundinfo* fileinfo)
 {
-	struct stat fileStat;
+	struct stat64 fileStat;
 	int i;
 
-	memset(&fileStat,0,sizeof(struct stat));
-	if( !stat (path, &fileStat) )
+	memset(&fileStat,0,sizeof(struct stat64));
+	if( !stat64 (path, &fileStat) )
 	{
 		if ( S_ISDIR ( fileStat.st_mode ) )
 			fileinfo->isdirectory = 1;
@@ -128,7 +133,8 @@ int fs_entry_stat(char *path, filefoundinfo* fileinfo)
 			i--;
 		}
 
-		strncpy(fileinfo->filename,&path[i],256);
+		strncpy(fileinfo->filename,&path[i],FS_HANDLE_MAX_FILENAME_SIZE);
+		fileinfo->filename[FS_HANDLE_MAX_FILENAME_SIZE] = '\0';
 
 		return 1;
 	}
@@ -159,23 +165,14 @@ DIR * fs_find_first_file(char *folder, filefoundinfo* fileinfo)
 				{
 					free(tmpstr);
 					return (void*)dir;
-
 				}
 
 				free(tmpstr);
 			}
-
-			closedir(dir);
-			dir = 0;
-
 		}
 
 		closedir(dir);
-		dir = 0;
-	}
-	else
-	{
-		dir = 0;
+		dir = NULL;
 	}
 
 	return dir;
@@ -186,6 +183,9 @@ int fs_find_next_file(DIR* dir, char *folder, filefoundinfo* fileinfo)
 	int ret;
 	struct dirent *d;
 	char * tmpstr;
+
+	if(!dir)
+		return 0;
 
 	d = readdir (dir);
 
@@ -291,7 +291,7 @@ fs_entry * search_entry(fs_handles_db * db, filefoundinfo *fileinfo, uint32_t pa
 		entry_list = entry_list->next;
 	}
 
-	return 0;
+	return NULL;
 }
 
 fs_entry * alloc_entry(fs_handles_db * db, filefoundinfo *fileinfo, uint32_t parent, uint32_t storage_id)
@@ -334,6 +334,9 @@ fs_entry * alloc_entry(fs_handles_db * db, filefoundinfo *fileinfo, uint32_t par
 fs_entry * alloc_root_entry(fs_handles_db * db, uint32_t storage_id)
 {
 	fs_entry * entry;
+
+	if( !db )
+		return NULL;
 
 	entry = malloc(sizeof(fs_entry));
 	if( entry )
@@ -393,7 +396,7 @@ int scan_and_add_folder(fs_handles_db * db, char * base, uint32_t parent, uint32
 	DIR* dir;
 	int ret;
 	filefoundinfo fileinfo;
-	struct stat entrystat;
+	struct stat64 entrystat;
 
 	PRINT_DEBUG("scan_and_add_folder : %s, Parent : 0x%.8X, Storage ID : 0x%.8X",base,parent,storage_id);
 
@@ -404,7 +407,7 @@ int scan_and_add_folder(fs_handles_db * db, char * base, uint32_t parent, uint32
 		{
 			PRINT_DEBUG("---------------------");
 			PRINT_DEBUG("File : %s",fileinfo.filename);
-			PRINT_DEBUG("Size : %d",fileinfo.size);
+			PRINT_DEBUG("Size : 0x%"SIZEHEX,fileinfo.size);
 			PRINT_DEBUG("IsDir: %d",fileinfo.isdirectory);
 			PRINT_DEBUG("---------------------");
 
@@ -429,7 +432,7 @@ int scan_and_add_folder(fs_handles_db * db, char * base, uint32_t parent, uint32
 
 			if(path)
 			{
-				ret = stat(path, &entrystat);
+				ret = stat64(path, &entrystat);
 				if(ret)
 				{
 					PRINT_DEBUG("scan_and_add_folder : discard entry %s - stat error", path);
@@ -450,7 +453,10 @@ int scan_and_add_folder(fs_handles_db * db, char * base, uint32_t parent, uint32
 		}
 	}while(entry);
 
-	return 0;
+	if(dir)
+		return 0;
+	else
+		return -1;
 }
 
 fs_entry * init_search_handle(fs_handles_db * db, uint32_t parent, uint32_t storage_id)
@@ -470,7 +476,7 @@ fs_entry * get_next_child_handle(fs_handles_db * db)
 
 	while( entry_list )
 	{
-		if( !( entry_list->flags & ENTRY_IS_DELETED ) && ( entry_list->parent == db->handle_search ) && ( entry_list->storage_id == db->storage_search ) )
+		if( !( entry_list->flags & ENTRY_IS_DELETED ) && ( entry_list->parent == db->handle_search ) && ( entry_list->storage_id == db->storage_search ) && ( entry_list->handle != entry_list->parent ) )
 		{
 			db->search_entry = entry_list->next;
 
@@ -482,7 +488,7 @@ fs_entry * get_next_child_handle(fs_handles_db * db)
 
 	db->search_entry = 0x00000000;
 
-	return 0;
+	return NULL;
 }
 
 fs_entry * get_entry_by_handle(fs_handles_db * db, uint32_t handle)
@@ -495,7 +501,10 @@ fs_entry * get_entry_by_handle(fs_handles_db * db, uint32_t handle)
 	{
 		if( !( entry_list->flags & ENTRY_IS_DELETED ) && ( entry_list->handle == handle ) )
 		{
-			return entry_list;
+			if( mtp_get_storage_root(db->mtp_ctx, entry_list->storage_id) )
+			{
+				return entry_list;
+			}
 		}
 
 		entry_list = entry_list->next;
@@ -519,7 +528,7 @@ fs_entry * get_entry_by_handle_and_storageid(fs_handles_db * db, uint32_t handle
 		entry_list = entry_list->next;
 	}
 
-	return 0;
+	return NULL;
 }
 
 char * build_full_path(fs_handles_db * db,char * root_path,fs_entry * entry)
@@ -529,7 +538,7 @@ char * build_full_path(fs_handles_db * db,char * root_path,fs_entry * entry)
 	char * full_path;
 	int full_path_offset;
 
-	full_path = 0;
+	full_path = NULL;
 
 	curentry = entry;
 	totallen = 0;
@@ -544,7 +553,7 @@ char * build_full_path(fs_handles_db * db,char * root_path,fs_entry * entry)
 		}
 		else
 		{
-			curentry = 0;
+			curentry = NULL;
 		}
 
 	}while( curentry );
@@ -579,7 +588,7 @@ char * build_full_path(fs_handles_db * db,char * root_path,fs_entry * entry)
 			}
 			else
 			{
-				curentry = 0;
+				curentry = NULL;
 			}
 		}while(curentry);
 
@@ -594,43 +603,43 @@ char * build_full_path(fs_handles_db * db,char * root_path,fs_entry * entry)
 	return full_path;
 }
 
-FILE * entry_open(fs_handles_db * db, fs_entry * entry)
+int entry_open(fs_handles_db * db, fs_entry * entry)
 {
-	FILE * f;
+	int file;
 	char * full_path;
 
-	f = 0;
+	file = -1;
 
 	full_path = build_full_path(db,mtp_get_storage_root(db->mtp_ctx, entry->storage_id), entry);
 	if( full_path )
 	{
-		f = fopen(full_path,"rb");
+		file = -1;
 
-		if(!f)
+		if(!set_storage_giduid(db->mtp_ctx, entry->storage_id))
+		{
+			file = open(full_path,O_RDONLY | O_LARGEFILE);
+		}
+
+		restore_giduid(db->mtp_ctx);
+
+		if( file == -1 )
 			PRINT_DEBUG("entry_open : Can't open %s !",full_path);
 
 		free(full_path);
 	}
 
-	return f;
+	return file;
 }
 
-int entry_read(fs_handles_db * db, FILE * f, unsigned char * buffer_out, int offset, int size)
+int entry_read(fs_handles_db * db, int file, unsigned char * buffer_out, mtp_offset offset, mtp_size size)
 {
 	int totalread;
 
-	if( f )
+	if( file != -1 )
 	{
-		fseek(f,offset,SEEK_SET);
+		lseek64(file, offset, SEEK_SET);
 
-		if( fread(buffer_out,size,1,f) > 0 )
-		{
-			totalread = ftell(f) - offset;
-		}
-		else
-		{
-			totalread = 0;
-		}
+		totalread = read( file, buffer_out, size );
 
 		return totalread;
 	}
@@ -638,17 +647,16 @@ int entry_read(fs_handles_db * db, FILE * f, unsigned char * buffer_out, int off
 	return 0;
 }
 
-void entry_close(FILE * f)
+void entry_close(int file)
 {
-	if( f )
-		fclose(f);
+	if( file != -1 )
+		close(file);
 }
 
-fs_entry * get_entry_by_wd( fs_handles_db * db, int watch_descriptor )
+fs_entry * get_entry_by_wd( fs_handles_db * db, int watch_descriptor, fs_entry * entry_list )
 {
-	fs_entry * entry_list;
-
-	entry_list = db->entry_list;
+	if(!entry_list && db)
+		entry_list = db->entry_list;
 
 	while( entry_list )
 	{
@@ -660,5 +668,23 @@ fs_entry * get_entry_by_wd( fs_handles_db * db, int watch_descriptor )
 		entry_list = entry_list->next;
 	}
 
-	return 0;
+	return NULL;
+}
+
+fs_entry * get_entry_by_storageid( fs_handles_db * db, uint32_t storage_id, fs_entry * entry_list )
+{
+	if(!entry_list && db)
+		entry_list = db->entry_list;
+
+	while( entry_list )
+	{
+		if( !( entry_list->flags & ENTRY_IS_DELETED ) && ( entry_list->storage_id == storage_id ) )
+		{
+			return entry_list;
+		}
+
+		entry_list = entry_list->next;
+	}
+
+	return NULL;
 }

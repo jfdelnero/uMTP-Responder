@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2019 Viveris Technologies
+ * Copyright (c) 2018 - 2021 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -29,12 +29,9 @@
 #define MTP_VERSION 100
 
 extern const unsigned short supported_op[];
-extern const unsigned short supported_event[];
-extern const unsigned short supported_property[];
-extern const unsigned short supported_formats[];
-
-extern const int supported_formats_size;
-extern const int supported_property_size;
-extern const int supported_event_size;
 extern const int supported_op_size;
+
+extern const unsigned short supported_event[];
+extern const int supported_event_size;
+
 #endif

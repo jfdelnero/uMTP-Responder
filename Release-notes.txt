@@ -1,8 +1,165 @@
 =================================================
 * uMTP Responder
-* Copyright (c) 2018 - 2019 Viveris Technologies
+* Lightweight USB Media Transfer Protocol (MTP)
+* responder
+*
+* Copyright (c) 2018 - 2021 Viveris Technologies
+*
+* https://github.com/viveris/uMTP-Responder
+*
 * Release notes
 =================================================
+
+Noteworthy changes in release v1.6.2 (2021-Dec-26)
+=================================================
+
+* Storage : Global and per storage UID/GID override options :
+
+    * Global and per storage UID/GID can be specified
+      in the configuration file.
+
+* Code fixes / improvements :
+
+    * Message queue (-cmd: operations) possible issue fixed.
+    * More checks added during the MTP operations.
+
+Noteworthy changes in release v1.5.1 (2021-Dec-6)
+=================================================
+
+* Storage : new flags and modes :
+
+    * "locked" flag support.
+
+    * "removable" flag support.
+
+* New dynamic/runtime commands (umtprd -cmd:COMMAND) :
+
+    * "lock"/"unlock" commands to dynamically lock/unlock lockable storage.
+
+        Examples:
+
+        # unlock all locked storage (set with the 'locked' option in the configuration file) :
+
+        umtprd -cmd:unlock
+
+        # lock all lockable storage (set with the 'locked' option in the configuration file) :
+
+        umtprd -cmd:lock
+
+    * "addstorage"/"rmstorage" commands to dynamically add/remove storage.
+
+        Examples:
+
+        umtprd '-cmd:addstorage:/tmp Tmp rw'
+        umtprd '-cmd:rmstorage:Tmp'
+
+        Use double-quotes when arguments have spaces in them:
+
+        umtprd '-cmd:addstorage:/path "My Path" rw,removable'
+        umtprd '-cmd:rmstorage:"My Path"'
+
+* Added umask configuration entry and fix permissions on send objects.
+
+* USB 3.0 SuperSpeed support.
+
+* Supports files rename at the MTP device side.
+
+* New "firmware_version" configuration field : set the MTP device info value.
+
+* Many fixes and improvements :
+
+    * Fix inotify for root folders when using multiple storage.
+
+    * Add guard to avoid storage from being added twice.
+
+    * Update the file size information to the dataset when modifying the file content.
+
+    * Check that fs handles db is valid before using it to get entries.
+
+    * Security fix : Fix the invalid ".." setObjectPropValue access trick.
+
+    * Fix deadlock when SendObject / GetObjectHandles fail.
+
+    * Fix permissions on newly created folders.
+
+    * Configuration file : realign user usb buffers size.
+
+    * Internal : Remove redundant code and possible double closedir issue.
+      (Fix segmentation fault with uClibc).
+
+    * Reduce the default max usb read/write buffer size to 8KB.
+      (This is required by some SoCs, e.g. the iMX series)
+
+
+    Many thanks to all the contributors !
+
+Noteworthy changes in release v1.3.6 (2020-Apr-3)
+=================================================
+
+* MTP Storage mount / unmount support (-cmd:mount:[store name] / -cmd:unmount:[store name] / ).
+
+* Config file :
+    * "storage" operation : new "notmounted" option.
+    * New usb_max_rd_buffer_size option (iMX6 issue workaround).
+    * New usb_max_wr_buffer_size option (iMX6 issue workaround).
+    * New read_buffer_cache_size option (iMX6 issue workaround).
+
+* Config file path can be changed in the command line (-conf:[Config file path]).
+
+* Async/inotify event : Send file size changes.
+
+* Fix : gadgetfs -> Handle unexpected disconnection while transferring a file.
+
+* Fix : Shared multi-drives inotify events.
+
+* Code fixes / improvements :
+    * MTP operations : Better errors handling.
+    * Code refactoring (MTP operations code separated).
+
+Noteworthy changes in release v1.0.0 (2019-10-7)
+=================================================
+
+* Major update ! : Now support all file operations !
+
+* Config file : storage "rw"/"ro" parameter added to write protect a drive.
+
+* Performance : Read and write throughput increased (~ 4x speedup).
+
+* Fix >2GB files listing.
+
+* Fix >2GB files access support on 32 bits systems.
+
+* File read/write transfer cancel operation supported.
+
+* Drives and objects properties support.
+
+* New supported commands :
+
+    * MTP_OPERATION_GET_PARTIAL_OBJECT_64
+    * MTP_OPERATION_SEND_PARTIAL_OBJECT
+    * MTP_OPERATION_BEGIN_EDIT_OBJECT
+    * MTP_OPERATION_END_EDIT_OBJECT
+    * MTP_OPERATION_TRUNCATE_OBJECT
+    * MTP_REQ_CANCEL
+    * MTP_REQ_RESET
+    * MTP_REQ_GET_DEVICE_STATUS
+    * MTP_OPERATION_GET_DEVICE_PROP_DESC
+    * MTP_OPERATION_GET_DEVICE_PROP_VALUE
+    * MTP_OPERATION_GET_OBJECT_REFERENCES
+    * MTP_OPERATION_GET_OBJECT_PROP_LIST
+    * MTP_OPERATION_GET_OBJECT_PROP_VALUE
+    * MTP_OPERATION_SET_OBJECT_PROP_VALUE
+
+* Many others fixes and improvements !
+
+Noteworthy changes in release v0.10.1 (2019-7-17)
+=================================================
+
+* True Unicode support.
+
+* Files/Folders renaming support.
+
+* Fixes and improvements.
 
 Noteworthy changes in release v0.9.7 (2019-1-10)
 =================================================

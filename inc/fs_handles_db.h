@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2019 Viveris Technologies
+ * Copyright (c) 2018 - 2021 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -28,6 +28,11 @@
 
 typedef struct fs_entry fs_entry;
 
+typedef int64_t mtp_size;
+typedef int64_t mtp_offset;
+
+#define FS_HANDLE_MAX_FILENAME_SIZE 256
+
 struct fs_entry
 {
 	uint32_t handle;
@@ -35,7 +40,7 @@ struct fs_entry
 	uint32_t storage_id;
 	char * name;
 	uint32_t flags;
-	uint32_t size;
+	mtp_size size;
 	uint32_t date;
 
 	int watch_descriptor;
@@ -64,8 +69,8 @@ typedef struct fs_handles_db_
 typedef struct filefoundinfo_
 {
 	int isdirectory;
-	char filename[256];
-	int size;
+	char filename[FS_HANDLE_MAX_FILENAME_SIZE + 1];
+	mtp_size size;
 }filefoundinfo;
 
 
@@ -76,14 +81,15 @@ fs_entry * init_search_handle(fs_handles_db * db, uint32_t parent, uint32_t stor
 fs_entry * get_next_child_handle(fs_handles_db * db);
 fs_entry * get_entry_by_handle(fs_handles_db * db, uint32_t handle);
 fs_entry * get_entry_by_handle_and_storageid(fs_handles_db * db, uint32_t handle, uint32_t storage_id);
-fs_entry * get_entry_by_wd(fs_handles_db * db, int watch_descriptor);
+fs_entry * get_entry_by_wd(fs_handles_db * db, int watch_descriptor, fs_entry * entry_list);
+fs_entry * get_entry_by_storageid( fs_handles_db * db, uint32_t storage_id, fs_entry * entry_list );
 fs_entry * add_entry(fs_handles_db * db, filefoundinfo *fileinfo, uint32_t parent, uint32_t storage_id);
 fs_entry * search_entry(fs_handles_db * db, filefoundinfo *fileinfo, uint32_t parent, uint32_t storage_id);
 fs_entry * alloc_root_entry(fs_handles_db * db, uint32_t storage_id);
 
-FILE * entry_open(fs_handles_db * db, fs_entry * entry);
-int entry_read(fs_handles_db * db, FILE * f, unsigned char * buffer_out, int offset, int size);
-void entry_close(FILE * f);
+int entry_open(fs_handles_db * db, fs_entry * entry);
+int entry_read(fs_handles_db * db, int file, unsigned char * buffer_out, mtp_offset offset, mtp_size size);
+void entry_close(int file);
 
 char * build_full_path(fs_handles_db * db,char * root_path,fs_entry * entry);
 

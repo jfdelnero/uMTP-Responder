@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2019 Viveris Technologies
+ * Copyright (c) 2018 - 2021 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -27,4 +27,6 @@
 #include "mtp.h"
 
 int mtp_create_storage(mtp_ctx * context);
+void mtp_add_storage_from_line(mtp_ctx *context, char *line, int idx);
+int mtp_remove_storage_from_line(mtp_ctx * context, char * name, int idx);
 #endif
