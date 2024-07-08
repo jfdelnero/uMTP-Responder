@@ -3,12 +3,24 @@
 * Lightweight USB Media Transfer Protocol (MTP)
 * responder
 *
-* Copyright (c) 2018 - 2021 Viveris Technologies
+* Copyright (c) 2018 - 2024 Viveris Technologies
 *
 * https://github.com/viveris/uMTP-Responder
 *
 * Release notes
 =================================================
+
+Noteworthy changes in release v1.6.8 (2024-Jul-8)
+=================================================
+
+* Fix the GetDeviceInfo operation : It can be used without sending an OpenSession command
+  according to the MTP specification.
+
+* Unicode string functions fixed to work on pre ARMv7 CPUs (Short values unaligned accesses fixed).
+
+* Systemd support : Can now tell Systemd that uMTP-Responder is ready (SYSTEMD_NOTIFY build option).
+
+* Code fixes and improvements.
 
 Noteworthy changes in release v1.6.2 (2021-Dec-26)
 =================================================

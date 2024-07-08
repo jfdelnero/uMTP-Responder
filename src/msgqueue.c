@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2021 Viveris Technologies
+ * Copyright (c) 2018 - 2024 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -106,14 +106,19 @@ void* msgqueue_thread( void* arg )
 
 				if(store_index >= 0)
 				{
-					pthread_mutex_lock( &ctx->inotify_mutex );
+					if( !pthread_mutex_lock( &ctx->inotify_mutex ) )
+					{
+						mount_store( ctx, store_index, 1 );
 
-					mount_store( ctx, store_index, 1 );
+						handle[0] = ctx->storages[store_index].storage_id;
 
-					handle[0] = ctx->storages[store_index].storage_id;
-					mtp_push_event( ctx, MTP_EVENT_STORE_ADDED, 1, (uint32_t *)&handle );
+						mtp_push_event( ctx, MTP_EVENT_STORE_ADDED, 1, (uint32_t *)&handle );
 
-					pthread_mutex_unlock( &ctx->inotify_mutex );
+						if( pthread_mutex_unlock( &ctx->inotify_mutex ) )
+						{
+							goto error;
+						}
+					}
 				}
 				else
 				{
@@ -126,15 +131,19 @@ void* msgqueue_thread( void* arg )
 				store_index = mtp_get_storage_index_by_name(ctx, (char*)&msg_buf.mesg_text + 8);
 				if(store_index >= 0)
 				{
-					pthread_mutex_lock( &ctx->inotify_mutex );
+					if( !pthread_mutex_lock( &ctx->inotify_mutex ) )
+					{
+						umount_store( ctx, store_index, 1 );
 
-					umount_store( ctx, store_index, 1 );
+						handle[0] = ctx->storages[store_index].storage_id;
 
-					handle[0] = ctx->storages[store_index].storage_id;
+						mtp_push_event( ctx, MTP_EVENT_STORE_REMOVED, 1, (uint32_t *)&handle );
 
-					mtp_push_event( ctx, MTP_EVENT_STORE_REMOVED, 1, (uint32_t *)&handle );
-
-					pthread_mutex_unlock( &ctx->inotify_mutex );
+						if( pthread_mutex_unlock( &ctx->inotify_mutex ) )
+						{
+							goto error;
+						}
+					}
 				}
 				else
 				{
@@ -152,17 +161,21 @@ void* msgqueue_thread( void* arg )
 						!(ctx->storages[store_index].flags & UMTP_STORAGE_LOCKED)
 					)
 					{
-						pthread_mutex_lock( &ctx->inotify_mutex );
+						if( !pthread_mutex_lock( &ctx->inotify_mutex ) )
+						{
+							umount_store( ctx, store_index, 0 );
 
-						umount_store( ctx, store_index, 0 );
+							ctx->storages[store_index].flags |= UMTP_STORAGE_LOCKED;
 
-						ctx->storages[store_index].flags |= UMTP_STORAGE_LOCKED;
+							handle[0] = ctx->storages[store_index].storage_id;
 
-						handle[0] = ctx->storages[store_index].storage_id;
+							mtp_push_event( ctx, MTP_EVENT_STORE_REMOVED, 1, (uint32_t *)&handle );
 
-						mtp_push_event( ctx, MTP_EVENT_STORE_REMOVED, 1, (uint32_t *)&handle );
-
-						pthread_mutex_unlock( &ctx->inotify_mutex );
+							if( pthread_mutex_unlock( &ctx->inotify_mutex ) )
+							{
+								goto error;
+							}
+						}
 					}
 
 					store_index++;
@@ -179,17 +192,21 @@ void* msgqueue_thread( void* arg )
 						(ctx->storages[store_index].flags & UMTP_STORAGE_LOCKED)
 					)
 					{
-						pthread_mutex_lock( &ctx->inotify_mutex );
+						if( !pthread_mutex_lock( &ctx->inotify_mutex ) )
+						{
+							mount_store( ctx, store_index, 0 );
 
-						mount_store( ctx, store_index, 0 );
+							ctx->storages[store_index].flags &= ~UMTP_STORAGE_LOCKED;
 
-						ctx->storages[store_index].flags &= ~UMTP_STORAGE_LOCKED;
+							handle[0] = ctx->storages[store_index].storage_id;
 
-						handle[0] = ctx->storages[store_index].storage_id;
+							mtp_push_event( ctx, MTP_EVENT_STORE_ADDED, 1, (uint32_t *)&handle );
 
-						mtp_push_event( ctx, MTP_EVENT_STORE_ADDED, 1, (uint32_t *)&handle );
-
-						pthread_mutex_unlock( &ctx->inotify_mutex );
+							if( pthread_mutex_unlock( &ctx->inotify_mutex ) )
+							{
+								goto error;
+							}
+						}
 					}
 
 					store_index++;
@@ -206,6 +223,13 @@ void* msgqueue_thread( void* arg )
 	msgctl(ctx->msgqueue_id, IPC_RMID, NULL);
 
 	PRINT_DEBUG("msgqueue_thread : Leaving msgqueue_thread...");
+
+	return NULL;
+
+error:
+	msgctl(ctx->msgqueue_id, IPC_RMID, NULL);
+
+	PRINT_DEBUG("msgqueue_thread : General Error ! Leaving msgqueue_thread...");
 
 	return NULL;
 }

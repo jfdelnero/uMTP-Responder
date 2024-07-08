@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2021 Viveris Technologies
+ * Copyright (c) 2018 - 2024 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -26,6 +26,7 @@
 #include "buildconf.h"
 
 #include <inttypes.h>
+#include <stdio.h>
 #include <pthread.h>
 #include <string.h>
 #include <sys/inotify.h>
@@ -95,7 +96,8 @@ void *inotify_gotsig(int sig, siginfo_t *info, void *ucontext)
 void* inotify_thread(void* arg)
 {
 	mtp_ctx * ctx;
-	int i,length;
+	int i, length;
+	int send_event_flag;
 	fs_entry * entry;
 	fs_entry * deleted_entry;
 	fs_entry * modified_entry;
@@ -122,6 +124,7 @@ void* inotify_thread(void* arg)
 	for (;;)
 	{
 		memset(inotify_buffer,0,sizeof(inotify_buffer));
+
 		length = read(ctx->inotify_fd, inotify_buffer, sizeof(inotify_buffer));
 
 		if ( length >= 0 )
@@ -142,7 +145,14 @@ void* inotify_thread(void* arg)
 						entry = NULL;
 						do
 						{
-							pthread_mutex_lock( &ctx->inotify_mutex );
+							send_event_flag = 0;
+
+							if ( pthread_mutex_lock( &ctx->inotify_mutex ) )
+							{
+								PRINT_ERROR( "inotify_thread - pthread_mutex_lock failure !");
+								return NULL;
+							}
+
 							entry = get_entry_by_wd( ctx->fs_db, event->wd, entry );
 							if ( get_file_info( ctx, event, entry, &fileinfo, 0 ) )
 							{
@@ -155,7 +165,7 @@ void* inotify_thread(void* arg)
 									{
 										// Send an "ObjectAdded" (0x4002) MTP event message with the entry handle.
 										handle[0] = new_entry->handle;
-										mtp_push_event( ctx, MTP_EVENT_OBJECT_ADDED, 1, (uint32_t *)&handle );
+										send_event_flag = 1;
 
 										PRINT_DEBUG( "inotify_thread (IN_CREATE): Entry %s created (Handle 0x%.8X)", event->name, new_entry->handle );
 									}
@@ -179,7 +189,17 @@ void* inotify_thread(void* arg)
 								entry = entry->next;
 							}
 
-							pthread_mutex_unlock( &ctx->inotify_mutex );
+							if ( pthread_mutex_unlock( &ctx->inotify_mutex ) )
+							{
+								PRINT_ERROR( "inotify_thread - pthread_mutex_unlock failure !");
+								return NULL;
+							}
+
+							if( send_event_flag )
+							{
+								mtp_push_event( ctx, MTP_EVENT_OBJECT_ADDED, 1, (uint32_t *)&handle );
+							}
+
 						}while(entry);
 					}
 
@@ -189,7 +209,13 @@ void* inotify_thread(void* arg)
 
 						do
 						{
-							pthread_mutex_lock( &ctx->inotify_mutex );
+							send_event_flag = 0;
+
+							if ( pthread_mutex_lock( &ctx->inotify_mutex ) )
+							{
+								PRINT_ERROR( "inotify_thread - pthread_mutex_lock failure !");
+								return NULL;
+							}
 
 							entry = get_entry_by_wd( ctx->fs_db, event->wd, entry );
 							if ( get_file_info( ctx, event, entry, &fileinfo, 1 ) )
@@ -199,7 +225,7 @@ void* inotify_thread(void* arg)
 								{
 									// Send an "ObjectInfoChanged" (0x4007) MTP event message with the entry handle.
 									handle[0] = modified_entry->handle;
-									mtp_push_event( ctx, MTP_EVENT_OBJECT_INFO_CHANGED, 1, (uint32_t *)&handle );
+									send_event_flag = 1;
 
 									PRINT_DEBUG( "inotify_thread (IN_MODIFY): Entry %s modified (Handle 0x%.8X)", event->name, modified_entry->handle);
 								}
@@ -214,7 +240,17 @@ void* inotify_thread(void* arg)
 								entry = entry->next;
 							}
 
-							pthread_mutex_unlock( &ctx->inotify_mutex );
+							if ( pthread_mutex_unlock( &ctx->inotify_mutex ) )
+							{
+								PRINT_ERROR( "inotify_thread - pthread_mutex_unlock failure !");
+								return NULL;
+							}
+
+							if( send_event_flag )
+							{
+								mtp_push_event( ctx, MTP_EVENT_OBJECT_INFO_CHANGED, 1, (uint32_t *)&handle );
+							}
+
 						}while(entry);
 					}
 
@@ -224,7 +260,13 @@ void* inotify_thread(void* arg)
 
 						do
 						{
-							pthread_mutex_lock( &ctx->inotify_mutex );
+							send_event_flag = 0;
+
+							if ( pthread_mutex_lock( &ctx->inotify_mutex ) )
+							{
+								PRINT_ERROR( "inotify_thread - pthread_mutex_lock failure !");
+								return NULL;
+							}
 
 							entry = get_entry_by_wd( ctx->fs_db, event->wd, entry );
 							if ( get_file_info( ctx, event, entry, &fileinfo, 1 ) )
@@ -241,7 +283,7 @@ void* inotify_thread(void* arg)
 
 									// Send an "ObjectRemoved" (0x4003) MTP event message with the entry handle.
 									handle[0] = deleted_entry->handle;
-									mtp_push_event( ctx, MTP_EVENT_OBJECT_REMOVED, 1, (uint32_t *)&handle );
+									send_event_flag = 1;
 
 									PRINT_DEBUG( "inotify_thread (IN_DELETE): Entry %s deleted (Handle 0x%.8X)", event->name, deleted_entry->handle);
 								}
@@ -256,7 +298,16 @@ void* inotify_thread(void* arg)
 								entry = entry->next;
 							}
 
-							pthread_mutex_unlock( &ctx->inotify_mutex );
+							if ( pthread_mutex_unlock( &ctx->inotify_mutex ) )
+							{
+								PRINT_ERROR( "inotify_thread - pthread_mutex_unlock failure !");
+								return NULL;
+							}
+
+							if( send_event_flag )
+							{
+								mtp_push_event( ctx, MTP_EVENT_OBJECT_REMOVED, 1, (uint32_t *)&handle );
+							}
 						}while(entry);
 					}
 				}

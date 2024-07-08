@@ -1,6 +1,6 @@
 /*
  * uMTP Responder
- * Copyright (c) 2018 - 2021 Viveris Technologies
+ * Copyright (c) 2018 - 2024 Viveris Technologies
  *
  * uMTP Responder is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -675,6 +675,19 @@ int build_DevicePropValue_dataset(mtp_ctx * ctx,void * buffer, int maxsize,uint3
 int objectproplist_element(mtp_ctx * ctx, void * buffer, int * ofs, int maxsize, uint16_t prop_code, uint32_t handle, void * data,uint32_t prop_code_param)
 {
 	int i;
+	uint64_t tmp_data[2];
+	void * tmp_ptr;
+
+	if( !ofs )
+		return 0;
+
+	tmp_data[0] = 0;
+	tmp_data[1] = 0;
+
+	if( data )
+		tmp_ptr = data;
+	else
+		tmp_ptr = (void*)&tmp_data;
 
 	if( (prop_code != prop_code_param) && (prop_code_param != 0xFFFFFFFF) )
 	{
@@ -695,28 +708,25 @@ int objectproplist_element(mtp_ctx * ctx, void * buffer, int * ofs, int maxsize,
 		switch(properties[i].data_type)
 		{
 			case MTP_TYPE_STR:
-				if(data)
-					*ofs = poke_string(buffer, *ofs, maxsize, (char*)data);
-				else
-					*ofs = poke08(buffer, *ofs, maxsize, 0);
+				*ofs = poke_string(buffer, *ofs, maxsize, (char*)tmp_ptr);
 			break;
 			case MTP_TYPE_UINT8:
-				*ofs = poke08(buffer, *ofs, maxsize, *((uint8_t*)data));
+				*ofs = poke08(buffer, *ofs, maxsize, *((uint8_t*)tmp_ptr));
 			break;
 			case MTP_TYPE_UINT16:
-				*ofs = poke16(buffer, *ofs, maxsize, *((uint16_t*)data));
+				*ofs = poke16(buffer, *ofs, maxsize, *((uint16_t*)tmp_ptr));
 			break;
 			case MTP_TYPE_UINT32:
-				*ofs = poke32(buffer, *ofs, maxsize, *((uint32_t*)data));
+				*ofs = poke32(buffer, *ofs, maxsize, *((uint32_t*)tmp_ptr));
 			break;
 			case MTP_TYPE_UINT64:
-				*ofs = poke32(buffer, *ofs, maxsize, *((uint64_t*)data) & 0xFFFFFFFF);
-				*ofs = poke32(buffer, *ofs, maxsize, *((uint64_t*)data) >> 32);
+				*ofs = poke32(buffer, *ofs, maxsize, *((uint64_t*)tmp_ptr) & 0xFFFFFFFF);
+				*ofs = poke32(buffer, *ofs, maxsize, *((uint64_t*)tmp_ptr) >> 32);
 			break;
 			case MTP_TYPE_UINT128:
 				for(i=0;i<4;i++)
 				{
-					*ofs = poke32(buffer, *ofs, maxsize, *((uint32_t*)data)+i);
+					*ofs = poke32(buffer, *ofs, maxsize, *((uint32_t*)tmp_ptr)+i);
 				}
 			break;
 			default:
@@ -738,8 +748,13 @@ int build_objectproplist_dataset(mtp_ctx * ctx, void * buffer, int maxsize,fs_en
 	int ofs,ret,numberofelements;
 	char * path;
 	char timestr[32];
-	uint32_t tmp_dword;
+	// tmp_dword : 2 dword to fix the static analysis error with the MTP_TYPE_UINT64 case.
+	// Probably a false positive alert
+	// but some codes was added to check possible second word corruption
+	uint32_t tmp_dword[2];
 	uint32_t tmp_dword_array[4];
+
+	tmp_dword[1] = 0xDEADBEEF;  // Canary
 
 	ret = -1;
 	path = build_full_path(ctx->fs_db, mtp_get_storage_root(ctx, entry->storage_id), entry);
@@ -766,23 +781,23 @@ int build_objectproplist_dataset(mtp_ctx * ctx, void * buffer, int maxsize,fs_en
 	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_STORAGE_ID, handle, &entry->storage_id,prop_code);
 
 	if(entry->flags & ENTRY_IS_DIR)
-		tmp_dword = MTP_FORMAT_ASSOCIATION;
+		tmp_dword[0] = MTP_FORMAT_ASSOCIATION;
 	else
-		tmp_dword = MTP_FORMAT_UNDEFINED;
+		tmp_dword[0] = MTP_FORMAT_UNDEFINED;
 
-	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_OBJECT_FORMAT, handle, &tmp_dword,prop_code);
+	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_OBJECT_FORMAT, handle, &tmp_dword[0],prop_code);
 
 	if(entry->flags & ENTRY_IS_DIR)
-		tmp_dword = MTP_ASSOCIATION_TYPE_GENERIC_FOLDER;
+		tmp_dword[0] = MTP_ASSOCIATION_TYPE_GENERIC_FOLDER;
 	else
-		tmp_dword = 0x0000;
+		tmp_dword[0] = 0x0000;
 
-	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_ASSOCIATION_TYPE, handle, &tmp_dword,prop_code);
+	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_ASSOCIATION_TYPE, handle, &tmp_dword[0],prop_code);
 	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_PARENT_OBJECT, handle, &entry->parent,prop_code);
 	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_OBJECT_SIZE, handle, &entry->size,prop_code);
 
-	tmp_dword = 0x0000;
-	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_PROTECTION_STATUS, handle, &tmp_dword,prop_code);
+	tmp_dword[0] = 0x0000;
+	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_PROTECTION_STATUS, handle, &tmp_dword[0],prop_code);
 
 	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_OBJECT_FILE_NAME, handle, entry->name,prop_code);
 	numberofelements += objectproplist_element(ctx, buffer, &ofs, maxsize, MTP_PROPERTY_NAME, handle, entry->name,prop_code);
@@ -810,5 +825,9 @@ int build_objectproplist_dataset(mtp_ctx * ctx, void * buffer, int maxsize,fs_en
 
 	poke32(buffer, 0, maxsize, numberofelements);   // Number of elements
 
+	if( tmp_dword[1] != 0xDEADBEEF )
+	{
+		PRINT_ERROR("build_objectproplist_dataset : second dword modified ! Please report ! (0x%.8X)", tmp_dword[1] );
+	}
 	return ofs;
 }
