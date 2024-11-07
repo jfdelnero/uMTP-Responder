@@ -173,7 +173,7 @@ int build_response(mtp_ctx * ctx, uint32_t tx_id, uint16_t type, uint16_t status
 	return ofs;
 }
 
-int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newhandle, uint32_t parent_handle, uint32_t storage_id)
+int parse_incoming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newhandle, uint32_t parent_handle, uint32_t storage_id)
 {
 	MTP_PACKET_HEADER * tmp_hdr;
 	unsigned char *dataset_ptr;
@@ -204,13 +204,13 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 	storage_flags = mtp_get_storage_flags(ctx, storage_id);
 	if( storage_flags == 0xFFFFFFFF )
 	{
-		PRINT_DEBUG("parse_incomming_dataset : Storage 0x%.8x is Invalid !",storage_id);
+		PRINT_DEBUG("%s : Storage 0x%.8x is Invalid !", __func__, storage_id);
 		return MTP_RESPONSE_INVALID_STORAGE_ID;
 	}
 
 	if( (storage_flags & UMTP_STORAGE_READONLY) )
 	{
-		PRINT_DEBUG("parse_incomming_dataset : Storage 0x%.8x is Read only !", storage_id);
+		PRINT_DEBUG("%s : Storage 0x%.8x is Read only !", __func__, storage_id);
 		return MTP_RESPONSE_STORE_READ_ONLY;
 	}
 
@@ -269,7 +269,7 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 
 							if(!set_storage_giduid(ctx, entry->storage_id))
 							{
-								ret = mkdir(tmp_path, 0700);
+								ret = mkdir(tmp_path, 0777);
 							}
 
 							restore_giduid(ctx);
@@ -287,9 +287,6 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 
 								return ret_code;
 							}
-
-							if(ctx->usb_cfg.val_umask >= 0)
-								chmod(tmp_path, 0777 & (~ctx->usb_cfg.val_umask));
 
 							tmp_file_entry.isdirectory = 1;
 							strcpy(tmp_file_entry.filename,tmp_str);
@@ -362,7 +359,9 @@ int parse_incomming_dataset(mtp_ctx * ctx,void * datain,int size,uint32_t * newh
 
 							if(!set_storage_giduid(ctx, storage_id))
 							{
-								file = open(tmp_path,O_WRONLY | O_CREAT | O_TRUNC | O_LARGEFILE, S_IRUSR|S_IWUSR);
+								file = open(tmp_path,
+										O_WRONLY | O_CREAT | O_TRUNC | O_LARGEFILE,
+										S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
 							}
 
 							restore_giduid(ctx);
@@ -423,7 +422,7 @@ int check_and_send_USB_ZLP(mtp_ctx * ctx , int size)
 	// USB ZLP needed ?
 	if( (size >= ctx->max_packet_size) && !(size % ctx->max_packet_size) )
 	{
-		PRINT_DEBUG("%d bytes transfert ended - ZLP packet needed", size);
+		PRINT_DEBUG("%d bytes transfer ended - ZLP packet needed", size);
 
 		// Yes - Send zero lenght packet.
 		write_usb(ctx->usb_ctx,EP_DESCRIPTOR_IN,ctx->wrbuffer,0);
@@ -778,8 +777,6 @@ uint32_t mtp_get_storage_id_by_name(mtp_ctx * ctx, char * name)
 {
 	int i;
 
-	PRINT_DEBUG("mtp_get_storage_id_by_name : %s", name );
-
 	i = 0;
 	while(i < MAX_STORAGE_NB)
 	{
@@ -787,7 +784,8 @@ uint32_t mtp_get_storage_id_by_name(mtp_ctx * ctx, char * name)
 		{
 			if( !strcmp(ctx->storages[i].description, name ) )
 			{
-				PRINT_DEBUG("mtp_get_storage_id_by_name : %s -> %.8X",
+				PRINT_DEBUG("%s : %s -> %.8X",
+					    __func__,
 					    ctx->storages[i].root_path,
 						ctx->storages[i].storage_id);
 
@@ -797,14 +795,14 @@ uint32_t mtp_get_storage_id_by_name(mtp_ctx * ctx, char * name)
 		i++;
 	}
 
+	PRINT_DEBUG("%s : '%s' not found", __func__, name );
+
 	return 0xFFFFFFFF;
 }
 
 int mtp_get_storage_index_by_name(mtp_ctx * ctx, char * name)
 {
 	int i;
-
-	PRINT_DEBUG("mtp_get_storage_index_by_name : %s", name );
 
 	i = 0;
 	while(i < MAX_STORAGE_NB)
@@ -813,7 +811,8 @@ int mtp_get_storage_index_by_name(mtp_ctx * ctx, char * name)
 		{
 			if( !strcmp(ctx->storages[i].description, name ) )
 			{
-				PRINT_DEBUG("mtp_get_storage_index_by_name : %s -> %.8X",
+				PRINT_DEBUG("%s : %s -> %.8X",
+					    __func__,
 					    ctx->storages[i].root_path,
 						i);
 
@@ -823,14 +822,14 @@ int mtp_get_storage_index_by_name(mtp_ctx * ctx, char * name)
 		i++;
 	}
 
+	PRINT_DEBUG("%s : '%s' not found", __func__, name );
+
 	return -1;
 }
 
 int mtp_get_storage_index_by_id(mtp_ctx * ctx, uint32_t storage_id)
 {
 	int i;
-
-	PRINT_DEBUG("mtp_get_storage_index_by_id : 0x%X", storage_id );
 
 	i = 0;
 	while(i < MAX_STORAGE_NB)
@@ -839,7 +838,8 @@ int mtp_get_storage_index_by_id(mtp_ctx * ctx, uint32_t storage_id)
 		{
 			if( ctx->storages[i].storage_id == storage_id )
 			{
-				PRINT_DEBUG("mtp_get_storage_index_by_id : %.8X -> %d",
+				PRINT_DEBUG("%s : %.8X -> %d",
+					    __func__,
 					    storage_id,
 					    i );
 				return i;
@@ -848,14 +848,14 @@ int mtp_get_storage_index_by_id(mtp_ctx * ctx, uint32_t storage_id)
 		i++;
 	}
 
+	PRINT_DEBUG("%s : 0x%X not found", __func__, storage_id );
+
 	return -1;
 }
 
 char * mtp_get_storage_root(mtp_ctx * ctx, uint32_t storage_id)
 {
 	int i;
-
-	PRINT_DEBUG("mtp_get_storage_root : %.8X", storage_id );
 
 	i = 0;
 	while(i < MAX_STORAGE_NB)
@@ -864,7 +864,8 @@ char * mtp_get_storage_root(mtp_ctx * ctx, uint32_t storage_id)
 		{
 			if( ctx->storages[i].storage_id == storage_id )
 			{
-				PRINT_DEBUG("mtp_get_storage_root : %.8X -> %s",
+				PRINT_DEBUG("%s : %.8X -> %s",
+					    __func__,
 					    storage_id,
 					    ctx->storages[i].root_path );
 				return ctx->storages[i].root_path;
@@ -873,14 +874,13 @@ char * mtp_get_storage_root(mtp_ctx * ctx, uint32_t storage_id)
 		i++;
 	}
 
+	PRINT_DEBUG("%s : %.8X not found", __func__, storage_id );
 	return NULL;
 }
 
 char * mtp_get_storage_description(mtp_ctx * ctx, uint32_t storage_id)
 {
 	int i;
-
-	PRINT_DEBUG("mtp_get_storage_description : %.8X", storage_id );
 
 	i = 0;
 	while(i < MAX_STORAGE_NB)
@@ -889,7 +889,8 @@ char * mtp_get_storage_description(mtp_ctx * ctx, uint32_t storage_id)
 		{
 			if( ctx->storages[i].storage_id == storage_id )
 			{
-				PRINT_DEBUG("mtp_get_storage_description : %.8X -> %s",
+				PRINT_DEBUG("%s : %.8X -> %s",
+					    __func__,
 					    storage_id,
 					    ctx->storages[i].description );
 				return ctx->storages[i].description;
@@ -898,14 +899,14 @@ char * mtp_get_storage_description(mtp_ctx * ctx, uint32_t storage_id)
 		i++;
 	}
 
+	PRINT_DEBUG("%s : %.8X not found", __func__, storage_id );
+
 	return NULL;
 }
 
 uint32_t mtp_get_storage_flags(mtp_ctx * ctx, uint32_t storage_id)
 {
 	int i;
-
-	PRINT_DEBUG("mtp_get_storage_flags : %.8X", storage_id );
 
 	i = 0;
 	while(i < MAX_STORAGE_NB)
@@ -914,7 +915,8 @@ uint32_t mtp_get_storage_flags(mtp_ctx * ctx, uint32_t storage_id)
 		{
 			if( ctx->storages[i].storage_id == storage_id )
 			{
-				PRINT_DEBUG("mtp_get_storage_flags : %.8X -> 0x%.8X",
+				PRINT_DEBUG("%s : %.8X -> 0x%.8X",
+					    __func__,
 					    storage_id,
 					    ctx->storages[i].flags );
 				return ctx->storages[i].flags;
@@ -922,6 +924,8 @@ uint32_t mtp_get_storage_flags(mtp_ctx * ctx, uint32_t storage_id)
 		}
 		i++;
 	}
+
+	PRINT_DEBUG("%s : %.8X not found", __func__, storage_id );
 
 	return 0xFFFFFFFF;
 }
